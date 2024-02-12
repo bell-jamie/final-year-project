@@ -62,6 +62,7 @@ function newEnergyState(ψ_plus_prev_in, ψ_pos_in)
     else
         ψ_plus_out = ψ_plus_prev_in
     end
+    true, ψ_plus_out # why true?
 end
 
 function stepPhaseField(sh_in, ψ_plus_prev_in, f_tol)
@@ -77,11 +78,10 @@ function stepPhaseField(sh_in, ψ_plus_prev_in, f_tol)
 end
 
 function stepDisplacement(uh_in, sh_in, v_app, f_tol)
-    u_app_1 = VectorValue(0.0, 0.0)
-    u_app_2 = VectorValue(0.0, v_app)
-    u_app_3 = VectorValue(0.0, -v_app)
-    U_disp = TrialFESpace(V0_disp, [u_app_2]) # might want to check this
-    res_disp(u, v) = ∫((ε(v) ⊙ (σMod ∘ (ε(u), ε(uh_in), sh_in)))) * dΩ # why does σMod require \circ to compose the function?
+    u_app_1 = VectorValue(0.0, v_app)
+    u_app_2 = VectorValue(0.0, 0.0)
+    U_disp = TrialFESpace(V0_disp, [u_app_1, u_app_2])
+    res_disp(u, v) = ∫((ε(v) ⊙ (σMod ∘ (ε(u), ε(uh_in), sh_in)))) * dΩ
     jac_disp(u, du, v) = ∫((ε(v) ⊙ (σMod ∘ (ε(du), ε(uh_in), sh_in)))) * dΩ
     op_disp = FEOperator(res_disp, jac_disp, U_disp, V0_disp)
     nls_disp = NLSolver(show_trace=true, method=:newton, linesearch=BackTracking(), ftol=f_tol, iterations=5)
@@ -107,6 +107,9 @@ function project(f, V, dΩ)
     op = AffineFEOperator(a, l, V, V)
     solve(op)
 end
+
+# Stress Function
+σ_elas(ε) = C_mat ⊙ ε
 
 
 ## Constants
@@ -162,7 +165,7 @@ sh = FEFunction(V0_pf, ones(num_free_dofs(V0_pf)))
 
 # Displacement Field
 reffe_disp = ReferenceFE(lagrangian, VectorValue{2,Float64}, order)
-V0_disp = TestFESpace(model, reffe_disp, conformity=:H1, dirichlet_tags=["bottom"], dirichlet_masks=[(true, true)])
+V0_disp = TestFESpace(model, reffe_disp, conformity=:H1, dirichlet_tags=["top", "bottom"], dirichlet_masks=[(true, true), (true, true)])
 uh = zero(V0_disp)
 
 # Apply Load
@@ -236,8 +239,8 @@ while v_app .< v_app_max
 
     if converged
         node_force = sum(∫(n_Γ_load ⋅ (σMod ∘ (ε(uh), ε(uh), sh))) * dΓ_load) * vb
-        yell = push!(load, node_force[2]) # why yell?
-
+        #yell = push!(load, node_force[2]) # why yell?
+        push!(load, node_force[2])
         push!(displacement, v_app)
 
         if mod(count, 20) == 0 # write every 20th iteration
@@ -246,7 +249,7 @@ while v_app .< v_app_max
 
         if v_app >= 0 && mod(count, 10) == 0 # displacement has been applied and every 10th iteration
             data_frame = DataFrame(Displacement=displacement, Force=load)
-            CSV.write("partialSolve-iter-$count.csv", data_frame)
+            CSV.write("partialSolve-iter-$count.csv", data_frame) # rewrite to create only one continuining csv
         end
 
         global δv = min(δv * growth_rate, δv_max)

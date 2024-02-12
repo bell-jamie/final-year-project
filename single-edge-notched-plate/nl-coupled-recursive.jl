@@ -18,7 +18,6 @@ using Gridap.Algebra # for the residual function
 
 
 ## Functions
-
 function elasFourthOrderConstTensor(E, ν, PlanarState)
     if PlanarState == "PlaneStrain"
         C1111 = E / (1 - ν * ν)
@@ -107,6 +106,7 @@ function project(f, V, dΩ)
     solve(op)
 end
 
+
 ## Constants
 # Geometry Constants
 const ls = 3e-5
@@ -139,8 +139,8 @@ I2 = SymTensorValue{2,Float64}(1.0, 0.0, 1.0)
 I4 = I2 ⊗ I2
 I4_sym = one(SymFourthOrderTensorValue{2,Float64})
 
-## Model Setup
 
+## Model Setup
 model = GmshDiscreteModel("notchedPlateTriangular.msh")
 
 order = 2
@@ -166,7 +166,7 @@ uh = zero(V0_disp)
 # Apply Load
 Γ_load = BoundaryTriangulation(model, "top")
 dΓ_load = Measure(Γ_load, degree)
-n_dΓ_load = get_normal_vector(Γ_load)
+n_Γ_load = get_normal_vector(Γ_load)
 
 # Initialise Parameters
 count = 1
@@ -189,6 +189,7 @@ push!(CL_new, 0.0)
 
 tick() # start timer
 
+## Main Loop
 while v_app .< v_app_max
     v_app += δv # apply increment
     @printf("Displacement step: %i // Applied displacement: %.7e\n", count, float(v_app))
@@ -210,6 +211,7 @@ while v_app .< v_app_max
 
         # Check for convergence
         if pf_residual < tol && disp_residual < tol
+            converged = true
             @printf("PDE residuals converged\n")
             break
         else
@@ -231,7 +233,44 @@ while v_app .< v_app_max
     end
 
     if converged
-        node_force = sum(∫)
+        node_force = sum(∫(n_Γ_load ⋅ (σMod ∘ (ε(uh), ε(uh), sh))) * dΓ_load) * vb
+        yell = push!(load, node_force[2])
 
+        push!(displacement, v_app)
+
+        if mod(count, 20) == 0 # write every 20th iteration
+            writevtk(Ω, "partialSolve-iter-$count.vtu", cellfields=["uh" => uh, "s" => sh, "epsi" => ε(uh), "sigma" => σ_elas ∘ (ε(uh))])
+        end
+
+        if v_app >= 0 && mod(count, 10) == 0 # displacement has been applied and every 10th iteration
+            data_frame = DataFrame(Displacement=displacement, Force=load)
+            CSV.write("partialSolve-iter-$count.csv", data_frame)
+        end
+
+        global δv = min(δv * growth_rate, δv_max)
+        global count += 1
+    end
+
+    if early_quit
+        break
     end
 end
+
+tock() # end timer
+
+
+## Results
+# Write File
+writevtk(Ω, "SENPCoupledRecursive.vtu", cellfields=["uh" => uh, "s" => sh, "epsi" => ε(uh), "sigma" => σ_elas ∘ (ε(uh))])
+
+# Plotting
+plt.plot(displacement * 1e3, load)
+plt.xlabel("Displacement (mm)")
+plt.ylabel("Load (N)")
+# plt.legend("")
+plt.title("Single Edge Notched Plate - Non-Linear Recursive")
+plt.grid()
+plt.show()
+
+data_frame = DataFrame(Displacement=displacement, Force=load)
+CSV.write("fullSolve.csv", data_frame)

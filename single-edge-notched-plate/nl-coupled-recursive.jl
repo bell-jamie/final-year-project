@@ -1,19 +1,19 @@
 using GridapGmsh
 using Gridap
-using Gridap.Geometry
+#using Gridap.Geometry
 using Gridap.TensorValues
 using Gridap.Fields
-using FillArrays
+#using FillArrays
 using Gridap.CellData
 using Printf
 using PyPlot
-using PyCall
+#using PyCall
 using TickTock
 using CSV
 using DataFrames
 using LineSearches: BackTracking
-using NLsolve
-using ForwardDiff
+#using NLsolve
+#using ForwardDiff
 using Gridap.Algebra # for the residual function
 
 
@@ -65,12 +65,14 @@ function newEnergyState(ψ_plus_prev_in, ψ_pos_in)
 end
 
 function stepPhaseField(sh_in, ψ_plus_prev_in, f_tol)
-    res_pf(s, ϕ) = ∫(Gc(tags) * ls * ∇(ϕ) ⋅ ∇(s) + 2 * ψ_plus_prev_in * s * ϕ + (Gc(tags) / ls) * s * ϕ) * dΩ - ∫((Gc(tags) * ϕ) / ls) * dΩ
-    jac_pf(s, ds, ϕ) = ∫(Gc(tags) * ls * ∇(ϕ) ⋅ ∇(ds) + 2 * ψ_plus_prev_in * ds * ϕ + (Gc(tags) / ls) * ds * ϕ) * dΩ
-    op_pf = FEOperator(res_pf, jac_pf, u_pf, v0_pf)
+    #res_pf(s, ϕ) = ∫(Gc(tags) * ls * ∇(ϕ) ⋅ ∇(s) + 2 * ψ_plus_prev_in * s * ϕ + (Gc(tags) / ls) * s * ϕ) * dΩ - ∫((Gc(tags) * ϕ) / ls) * dΩ
+    res_pf(s, ϕ) = ∫(gc_bulk * ls * ∇(ϕ) ⋅ ∇(s) + 2 * ψ_plus_prev_in * s * ϕ + (gc_bulk / ls) * s * ϕ) * dΩ - ∫((gc_bulk * ϕ) / ls) * dΩ
+    #jac_pf(s, ds, ϕ) = ∫(Gc(tags) * ls * ∇(ϕ) ⋅ ∇(ds) + 2 * ψ_plus_prev_in * ds * ϕ + (Gc(tags) / ls) * ds * ϕ) * dΩ
+    jac_pf(s, ds, ϕ) = ∫(gc_bulk * ls * ∇(ϕ) ⋅ ∇(ds) + 2 * ψ_plus_prev_in * ds * ϕ + (gc_bulk / ls) * ds * ϕ) * dΩ
+    op_pf = FEOperator(res_pf, jac_pf, U_pf, V0_pf)
     nls = NLSolver(show_trace=true, method=:newton, linesearch=BackTracking(), ftol=f_tol, iterations=5)
     solver_pf = FESolver(nls)
-    sh_out = solve!(sh_in, solver_pf, op_pf) # removed ","
+    sh_out, = solve!(sh_in, solver_pf, op_pf) # don't remove "," - turns out this was very needed!
     return sh_out, norm(residual(op_pf, sh_out), Inf)
 end
 
@@ -78,13 +80,13 @@ function stepDisplacement(uh_in, sh_in, v_app, f_tol)
     u_app_1 = VectorValue(0.0, 0.0)
     u_app_2 = VectorValue(0.0, v_app)
     u_app_3 = VectorValue(0.0, -v_app)
-    u_disp = TrialFESpace(v0_disp, [u_app_1, u_app_1, u_app_2, u_app_1]) # might want to check this
+    U_disp = TrialFESpace(V0_disp, [u_app_2]) # might want to check this
     res_disp(u, v) = ∫((ε(v) ⊙ (σMod ∘ (ε(u), ε(uh_in), sh_in)))) * dΩ # why does σMod require \circ to compose the function?
     jac_disp(u, du, v) = ∫((ε(v) ⊙ (σMod ∘ (ε(du), ε(uh_in), sh_in)))) * dΩ
-    op_disp = FEOperator(res_disp, jac_disp, u_disp, v0_disp)
+    op_disp = FEOperator(res_disp, jac_disp, U_disp, V0_disp)
     nls_disp = NLSolver(show_trace=true, method=:newton, linesearch=BackTracking(), ftol=f_tol, iterations=5)
     solver_disp = FESolver(nls_disp) # in theory this could be nested directly in solve! and nls_disp inside FESolver
-    uh_out = solve!(uh_in, solver_disp, op_disp)
+    uh_out, = solve!(uh_in, solver_disp, op_disp)
     return uh_out, norm(residual(op_disp, uh_out), Inf)
 end
 
@@ -154,17 +156,17 @@ V = FESpace(model, reffe, conformity=:L2)
 
 # Phase Field
 reffe_pf = ReferenceFE(lagrangian, Float64, order)
-V0_pf = TestFESpace(reffe_pf, model)
+V0_pf = TestFESpace(model, reffe_pf, conformity=:H1)
 U_pf = TrialFESpace(V0_pf)
 sh = FEFunction(V0_pf, ones(num_free_dofs(V0_pf)))
 
 # Displacement Field
 reffe_disp = ReferenceFE(lagrangian, VectorValue{2,Float64}, order)
-V0_disp = TestFESpace(reffe_disp, model, conformity=:H1, dirichlet_tags=["bottom"], dirichlet_masks=[true, true])
+V0_disp = TestFESpace(model, reffe_disp, conformity=:H1, dirichlet_tags=["bottom"], dirichlet_masks=[(true, true)])
 uh = zero(V0_disp)
 
 # Apply Load
-Γ_load = BoundaryTriangulation(model, "top")
+Γ_load = BoundaryTriangulation(model, tags="top")
 dΓ_load = Measure(Γ_load, degree)
 n_Γ_load = get_normal_vector(Γ_load)
 
@@ -191,7 +193,7 @@ tick() # start timer
 
 ## Main Loop
 while v_app .< v_app_max
-    v_app += δv # apply increment
+    global v_app += δv # apply increment
     @printf("Displacement step: %i // Applied displacement: %.7e\n", count, float(v_app))
 
     converged = false
@@ -234,7 +236,7 @@ while v_app .< v_app_max
 
     if converged
         node_force = sum(∫(n_Γ_load ⋅ (σMod ∘ (ε(uh), ε(uh), sh))) * dΓ_load) * vb
-        yell = push!(load, node_force[2])
+        yell = push!(load, node_force[2]) # why yell?
 
         push!(displacement, v_app)
 

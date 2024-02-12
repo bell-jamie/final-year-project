@@ -142,8 +142,9 @@ function stepDisp(uh_in, sh_in, vApp, ftol)
     uApp3(x) = VectorValue(0.0, -vApp)
     U_Disp = TrialFESpace(V0_Disp, [uApp1, uApp2])
     res_Disp(u, v) = ∫((ε(v) ⊙ (σ_mod ∘ (ε(u), ε(uh_in), sh_in)))) * dΩ
-    jac_Disp(u, du, v) = ∫((ε(v) ⊙ (σ_mod ∘ (ε(du), ε(uh_in), sh_in)))) * dΩ
-    op_Disp = FEOperator(res_Disp, jac_Disp, U_Disp, V0_Disp)
+    #jac_Disp(u, du, v) = ∫((ε(v) ⊙ (σ_mod ∘ (ε(du), ε(uh_in), sh_in)))) * dΩ
+    #op_Disp = FEOperator(res_Disp, jac_Disp, U_Disp, V0_Disp)
+    op_Disp = FEOperator(res_Disp, U_Disp, V0_Disp)
     nls_Disp = NLSolver(show_trace=true, method=:newton, linesearch=BackTracking(), ftol=ftol, iterations=5)
     solver_Disp = FESolver(nls_Disp)
     uh_out, = solve!(uh_in, solver_Disp, op_Disp)

@@ -1,9 +1,9 @@
 using GridapGmsh
 using Gridap
-#using Gridap.Geometry
+using Gridap.Geometry
 using Gridap.TensorValues
 using Gridap.Fields
-#using FillArrays
+using FillArrays
 using Gridap.CellData
 using Printf
 using PyPlot

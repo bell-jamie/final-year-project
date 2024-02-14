@@ -1,20 +1,15 @@
 using GridapGmsh
 using Gridap
-#using Gridap.Geometry
 using Gridap.TensorValues
 using Gridap.Fields
-#using FillArrays
 using Gridap.CellData
 using Printf
 using PyPlot
-#using PyCall
 using TickTock
 using CSV
 using DataFrames
 using LineSearches: BackTracking
-#using NLsolve
-#using ForwardDiff
-using Gridap.Algebra # for the residual function
+using Gridap.Algebra
 
 
 ## Functions
@@ -54,73 +49,40 @@ function ψPos(ε_in)
         0.5 * (I4_dev ⊙ σ(ε_in) ⊙ (I4_dev ⊙ ε_in))
     end
 end
-#=
-function newEnergyState(ψ_plus_prev_in, ψ_plus_in)
-    if ψ_plus_in >= ψ_plus_prev_in
-        ψ_plus_out = ψ_plus_in
-    else
-        ψ_plus_out = ψ_plus_prev_in
-    end
-    true, ψ_plus_out # why true?
-end
-=#
+
 function newEnergyState(ψ_plus_prev_in, ψ_plus_in)
     if ψ_plus_in >= ψ_plus_prev_in
         ψ_plus_in
     else
         ψ_plus_prev_in
     end
+    #true, ψ_plus_out
 end
 
 function stepPhaseField(sh_in, ψ_plus_prev_in, f_tol)
-    #res_pf(s, ϕ) = ∫(Gc(tags) * ls * ∇(ϕ) ⋅ ∇(s) + 2 * ψ_plus_prev_in * s * ϕ + (Gc(tags) / ls) * s * ϕ) * dΩ - ∫((Gc(tags) * ϕ) / ls) * dΩ
     res_pf(s, ϕ) = ∫(gc_bulk * ls * ∇(ϕ) ⋅ ∇(s) + 2 * ψ_plus_prev_in * s * ϕ + (gc_bulk / ls) * s * ϕ) * dΩ - ∫((gc_bulk * ϕ) / ls) * dΩ
-    #jac_pf(s, ds, ϕ) = ∫(Gc(tags) * ls * ∇(ϕ) ⋅ ∇(ds) + 2 * ψ_plus_prev_in * ds * ϕ + (Gc(tags) / ls) * ds * ϕ) * dΩ
     jac_pf(s, ds, ϕ) = ∫(gc_bulk * ls * ∇(ϕ) ⋅ ∇(ds) + 2 * ψ_plus_prev_in * ds * ϕ + (gc_bulk / ls) * ds * ϕ) * dΩ
     op_pf = FEOperator(res_pf, jac_pf, U_pf, V0_pf)
-    nls = NLSolver(show_trace=true, method=:newton, linesearch=BackTracking(), ftol=f_tol, iterations=5)
-    solver_pf = FESolver(nls)
-    sh_out, = solve!(sh_in, solver_pf, op_pf) # don't remove "," - turns out this was very needed!
+    nls = NLSolver(show_trace=true, method=:newton,
+        linesearch=BackTracking(), ftol=f_tol, iterations=5)
+    sh_out, = solve!(sh_in, FESolver(nls), op_pf)
     return sh_out, norm(residual(op_pf, sh_out), Inf)
 end
 
 function stepDisplacement(uh_in, sh_in, v_app, f_tol)
-    u_app_1 = VectorValue(0.0, v_app)
-    u_app_2 = VectorValue(0.0, 0.0)
-    U_disp = TrialFESpace(V0_disp, [u_app_1, u_app_2])
+    U_disp = TrialFESpace(V0_disp, [VectorValue(0.0, v_app), VectorValue(0.0, 0.0)])
     res_disp(u, v) = ∫(ε(v) ⊙ (σMod ∘ (ε(u), ε(uh_in), sh_in))) * dΩ
     jac_disp(u, du, v) = ∫(ε(v) ⊙ (σMod ∘ (ε(du), ε(uh_in), sh_in))) * dΩ
     op_disp = FEOperator(res_disp, jac_disp, U_disp, V0_disp)
-    nls_disp = NLSolver(show_trace=true, method=:newton, linesearch=BackTracking(), ftol=f_tol, iterations=5)
-    solver_disp = FESolver(nls_disp) # in theory this could be nested directly in solve! and nls_disp inside FESolver
-    uh_out, = solve!(uh_in, solver_disp, op_disp)
+    nls_disp = NLSolver(show_trace=true, method=:newton,
+        linesearch=BackTracking(), ftol=f_tol, iterations=5)
+    uh_out, = solve!(uh_in, FESolver(nls_disp), op_disp)
     return uh_out, norm(residual(op_disp, uh_out), Inf)
 end
-#=
-function Gc(tag) # this function may not be required for single edge notch
-    Gc_by_tag = Float64[]
-    for i ∈ eachindex(tag)
-        if tag[i] == CrackLine
-            push!(Gc_by_tag, gc)
-        else
-            push!(Gc_by_tag, 0.0)
-        end
-    end # no explicit return required
-end
 
-function project(f, V, dΩ)
-    a(u, v) = ∫(u * v) * dΩ
-    l(v) = ∫(v * f) * dΩ
-    op = AffineFEOperator(a, l, V, V)
-    solve(op)
-end
-=#
 function σ(ε)
     C_mat ⊙ ε
 end
-
-#σ(ε) = C_mat ⊙ ε
-
 
 ## Constants
 # Geometry Constants
@@ -153,11 +115,11 @@ const v_app_max = 2e-3 # total applied displacement
 I2 = SymTensorValue{2,Float64}(1.0, 0.0, 1.0)
 I4 = I2 ⊗ I2
 I4_sym = one(SymFourthOrderTensorValue{2,Float64})
-
+I4_vol = (1.0 / 2) * I4
+I4_dev = I4_sym - I4_vol
 
 ## Model Setup
 model = GmshDiscreteModel("notchedPlateTriangular.msh")
-
 order = 2
 degree = 2 * order
 
@@ -175,7 +137,9 @@ sh = FEFunction(V0_pf, ones(num_free_dofs(V0_pf)))
 
 # Displacement Field
 reffe_disp = ReferenceFE(lagrangian, VectorValue{2,Float64}, order)
-V0_disp = TestFESpace(model, reffe_disp, conformity=:H1, dirichlet_tags=["top", "bottom"], dirichlet_masks=[(true, true), (true, true)])
+V0_disp = TestFESpace(model, reffe_disp, conformity=:H1,
+    dirichlet_tags=["top", "bottom"],
+    dirichlet_masks=[(true, true), (true, true)])
 uh = zero(V0_disp)
 
 # Apply Load
@@ -219,6 +183,7 @@ while v_app .< v_app_max
         global uh, disp_residual = stepDisplacement(uh, sh, v_app, tol)
         @printf("Displacement residual: %.6e\n", disp_residual)
 
+        # Update Energy State
         ψ_pos_in = ψPos ∘ (ε(uh))
         update_state!(newEnergyState, ψ_plus_prev, ψ_pos_in)
 
@@ -252,7 +217,8 @@ while v_app .< v_app_max
         push!(displacement, v_app)
 
         if mod(count, 20) == 0 # write every 20th iteration
-            writevtk(Ω, "partialSolve-iter-$count.vtu", cellfields=["uh" => uh, "s" => sh, "epsi" => ε(uh), "sigma" => σ ∘ ε(uh)])
+            writevtk(Ω, "partialSolve-iter-$count.vtu",
+                cellfields=["uh" => uh, "s" => sh, "epsi" => ε(uh), "sigma" => σ ∘ ε(uh)])
         end
 
         if v_app >= 0 && mod(count, 10) == 0 # displacement has been applied and every 10th iteration
@@ -269,12 +235,13 @@ while v_app .< v_app_max
     end
 end
 
-tock() # end timer
+tock()
 
 
 ## Results
 # Write File
-writevtk(Ω, "SENPCoupledRecursive.vtu", cellfields=["uh" => uh, "s" => sh, "epsi" => ε(uh), "sigma" => σ ∘ ε(uh)])
+writevtk(Ω, "SENPCoupledRecursive.vtu",
+    cellfields=["uh" => uh, "s" => sh, "epsi" => ε(uh), "sigma" => σ ∘ ε(uh)])
 
 # Plotting
 plt.plot(displacement * 1e3, load)

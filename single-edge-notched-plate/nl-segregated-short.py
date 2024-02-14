@@ -1,6 +1,9 @@
 from sfepy import data_dir
 from sfepy.mechanics.matcoefs import stiffness_from_youngpoisson
 
+def applied_displacement(ts, co, **kwargs):
+    return 0.02 * ts.dt # temporary function
+
 E = 126e9
 nu = 0.3
 
@@ -8,8 +11,8 @@ filename_mesh = data_dir + '/notchedPlateTriangular.mesh'
 
 regions = {
     'omega' : 'all',
-    'top' : '', # find all the vertices on the top of the plate (x >= 0.5)
-    'bottom' : '', # find all the vertices on the bottom of the plate (x <= 0.5)
+    'top' : ('vertices in (y > 0.49)', 'facet'),
+    'bottom' : ('vertices in (y < -0.49)', 'facet'),
 }
 
 materials = {
@@ -17,8 +20,8 @@ materials = {
 }
 
 fields = {
-    'displacement' : ('real', 'vector', 'Omega', 1),
-    'phase-field' : ('real', 'scalar', 'Omega', 1),
+    'displacement' : ('real', 'vector', 'Omega', 2), # 2nd order approximation
+    'phase-field' : ('real', 'scalar', 'Omega', 2),
 }
 
 equations = {
@@ -34,13 +37,23 @@ variables = {
 }
 
 ebcs = {
-    'fixed' : ('Bottom', {'u.0' : 0.0, 'u.1' : 0.0}), # fix x and y of the bottom vertices
+    'fixed' : ('Bottom', {'u.all' : 0.0}), # fix x and y of the bottom vertices
+    'load' : ('Top', {'u.0' : 0.0, 'u.1' : 'applied_displacement'})
+}
+
+ics = {
+    'u_ic' : ('Omega', {'u.all' : 0.0}), # initial condition for displacement
+    's_ic' : ('Omega', {'u_pf' : 1.0}), # initial condition for phase-field
+}
+
+functions = {
+    'applied_displacement' : (applied_displacement,),
 }
 
 solvers = {
     'ls' : ('ls.scipy_direct', {}),
     'newton' : ('nls.newton', {
-        'i_max' : 1, # maximum number of iterations - make this equal to Julia code
-        'eps_a' : 1e-6, # res norm tolerance
+        'i_max' : 5, # maximum number of iterations
+        'eps_a' : 1e-6, # residual norm tolerance
     }),
 }

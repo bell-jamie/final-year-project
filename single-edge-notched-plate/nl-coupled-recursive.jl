@@ -83,6 +83,17 @@ function σ(ε)
     C_mat ⊙ ε
 end
 
+function centre_pad(s::String, total_width::Int; pad_char::Char='-')::String
+    if length(s) >= total_width
+        return s
+    end
+    padding_each_side = (total_width - length(s)) ÷ 2 # calculate padding on each side
+    padded_s = lpad(s, length(s) + padding_each_side, pad_char) # pad left
+    padded_s = rpad(padded_s, total_width, pad_char) # pad right
+    return padded_s
+end
+
+
 ## Constants
 # Geometry Constants
 const ls = 0.0075
@@ -114,7 +125,7 @@ I4_vol = (1.0 / 2) * I4
 I4_dev = I4_sym - I4_vol
 
 ## Model Setup
-model = GmshDiscreteModel("notchedPlateTriangular.msh")
+model = GmshDiscreteModel(joinpath(@__DIR__, "notchedPlateTriangular.msh"))
 order = 2
 degree = 2 * order
 
@@ -168,22 +179,27 @@ tick()
 ## Main Loop
 while v_app .< v_app_max
     global v_app += δv # apply increment
-    @printf("Displacement step: %i // Applied displacement: %.7e\n", count, float(v_app))
+    
+    @printf("\n%s\n", centre_pad(" Step: $count ", 40))
+    @printf("%s\n\n", centre_pad(" Displacement: $v_app m ", 40))
 
     converged = false
     cut_back = false
     early_quit = false
 
     for recur ∈ 1:recur_max
-        @printf("Recursive step: %i // Displacement increment: %.7e\n", recur, δv)
+        @printf("%s\n", centre_pad(" Cycle: $recur ", 40))
+        @printf("%s\n\n", centre_pad(" Increment: $δv m ", 40))
 
         # Solve Phase Field
+        @printf("%s\n", centre_pad(" Solving Phase-Field ", 40))
         global sh, pf_residual = stepPhaseField(sh, ψ_plus_prev, tol)
-        @printf("Phase field residual: %.6e\n", pf_residual)
+        @printf("%s\n\n", centre_pad(" Residual: $pf_residual", 40)) # i would like to round the residual at some point
 
         # Solve Displacement Field
+        @printf("%s\n", centre_pad(" Solving Displacement Field ", 40))
         global uh, disp_residual = stepDisplacement(uh, sh, v_app, tol)
-        @printf("Displacement residual: %.6e\n", disp_residual)
+        @printf("%s\n\n", centre_pad(" Residual: $disp_residual", 40))
 
         # Update Energy State
         ψ_pos_in = ψPos ∘ (ε(uh))
@@ -192,18 +208,18 @@ while v_app .< v_app_max
         # Check for convergence
         if pf_residual < tol && disp_residual < tol
             converged = true
-            @printf("PDE residuals converged\n")
+            @printf("PDE residuals converged\n\n")
             break
         end
 
         # Check for cutback
         if recur == recur_max
-            @printf("Max recursive steps reached - cutting back\n")
+            @printf("Max recursive steps reached - cutting back\n\n")
             cut_back = true
             v_app -= δv # remove increment
             δv = δv / 2 # halve increment
             if δv < δv_min
-                @printf("Minimum displacement increment reached - early quit\n")
+                @printf("Minimum displacement increment reached - early quit\n\n")
                 early_quit = true
                 break
             end
@@ -240,7 +256,7 @@ tock()
 
 ## Results
 # Write File
-writevtk(Ω, joinpath(directory_name, "SENPCoupledRecursive.vtu"),
+writevtk(Ω, joinpath(directory_name, "fullSolve.vtu"),
     cellfields=["uh" => uh, "s" => sh, "epsi" => ε(uh), "sigma" => σ ∘ ε(uh)])
 
 # Plotting
@@ -250,7 +266,7 @@ plt.ylabel("Load (N)")
 # plt.legend("")
 plt.title("Single Edge Notched Plate - Non-Linear Recursive")
 plt.grid()
-plt.show()
+display(gcf())
 
 data_frame = DataFrame(Displacement=displacement, Force=load)
 CSV.write(joinpath(directory_name, "fullSolve.csv"), data_frame)

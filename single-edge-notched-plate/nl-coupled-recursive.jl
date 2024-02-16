@@ -10,6 +10,7 @@ using CSV
 using DataFrames
 using LineSearches: BackTracking
 using Gridap.Algebra
+using Dates
 
 
 ## Functions
@@ -100,21 +101,21 @@ const ls = 0.0075
 const vb = 1
 
 # Elasticity Constants
-const E = 210e9
+const E = 210e3 # 210 GPa - base units are mm, therefore MPa is the same as N/mm^2
 const ν = 0.3
 const C_mat = elasFourthOrderConstTensor(E, ν, "PlaneStrain")
 
 # Fracture Constants
-const gc_bulk = 2700 # 2.7 N/mm
-const η = 1e-8
+const gc_bulk = 2.7 # 2.7 N/mm
+const η = 1e-15
 
 # Time Step Constants
 const growth_rate = 1.2 # δv can get larger if increment solved with no cutbacks
 const recur_max = 20 # maximum number of recursive steps to minimise PDE residuals
 const tol = 1e-6 # tolerance for PDE residuals
 const δv_min = 1e-7 # minimum displacement increment
-const δv_max = 1e-5 # maximum displacement increment
-const v_app_max = 5e-3 # total applied displacement
+const δv_max = 1e-3 # maximum displacement increment (1e-5)
+const v_app_max = 7e-3 # total applied displacement
 # v_app = 0.1 * v_app_max # initial applied displacement
 
 # Volumetric and Deviatoric Projection Tensors
@@ -145,7 +146,7 @@ sh = FEFunction(V0_pf, ones(num_free_dofs(V0_pf)))
 reffe_disp = ReferenceFE(lagrangian, VectorValue{2,Float64}, order)
 V0_disp = TestFESpace(model, reffe_disp, conformity=:H1,
     dirichlet_tags=["top", "bottom"],
-    dirichlet_masks=[(true, true), (true, true)])
+    dirichlet_masks=[(false, true), (true, true)])
 uh = zero(V0_disp)
 
 # Apply Load
@@ -167,10 +168,12 @@ push!(displacement, 0.0)
 ψ_plus_prev = CellState(0.0, dΩ)
 
 # IO
-directory_name = "nl-coupled-recursive-dat"
+now = Dates.now()
+formatted_date = Dates.format(now, "yyyy-mm-dd_HH-MM")
+save_directory = joinpath(@__DIR__, "nl-coupled-recursive-save", formatted_date)
 
-if !isdir(directory_name)
-    mkdir(directory_name)
+if !isdir(save_directory)
+    mkdir(save_directory)
 end
 
 tick()
@@ -181,7 +184,8 @@ while v_app .< v_app_max
     global v_app += δv # apply increment
     
     @printf("\n%s\n", centre_pad(" Step: $count ", 40))
-    @printf("%s\n\n", centre_pad(" Displacement: $v_app m ", 40))
+    @printf("%s\n\n", centre_pad(" Displacement: $v_app m ", 40)) # i need to develop a way to format this in scientific notation with padding
+    # maybe standalone print function that handles the padding? so it could take the same args as printf + the width and would directly call printf
 
     converged = false
     cut_back = false
@@ -189,7 +193,8 @@ while v_app .< v_app_max
 
     for recur ∈ 1:recur_max
         @printf("%s\n", centre_pad(" Cycle: $recur ", 40))
-        @printf("%s\n\n", centre_pad(" Increment: $δv m ", 40))
+        @printf("%s\n\n", centre_pad(" Increment: $δv m ", 40)) # why are we printing increment each time?
+        # maybe print residual tolerance?
 
         # Solve Phase Field
         @printf("%s\n", centre_pad(" Solving Phase-Field ", 40))
@@ -213,11 +218,13 @@ while v_app .< v_app_max
         end
 
         # Check for cutback
+        # I think that an adaptive cutback could be implemented, based on the magnitude of the residual, saving the number of cycles to cut back...
         if recur == recur_max
             @printf("Max recursive steps reached - cutting back\n\n")
             cut_back = true
             v_app -= δv # remove increment
             δv = δv / 2 # halve increment
+            # should probably pop() the last energy state otherwise there will be permanent damage not accounted for
             if δv < δv_min
                 @printf("Minimum displacement increment reached - early quit\n\n")
                 early_quit = true
@@ -232,14 +239,14 @@ while v_app .< v_app_max
         push!(load, node_force[2])
         push!(displacement, v_app)
 
-        if mod(count, 20) == 0 # write every 20th iteration
-            writevtk(Ω, joinpath(directory_name, "partialSolve.vtu"),
+        if mod(count, 10) == 0 # write every 10th iteration
+            writevtk(Ω, joinpath(save_directory, "partialSolve.vtu"),
                 cellfields=["uh" => uh, "s" => sh, "epsi" => ε(uh), "sigma" => σ ∘ ε(uh)])
         end
 
         if v_app >= 0 && mod(count, 10) == 0 # displacement has been applied and every 10th iteration
             data_frame = DataFrame(Displacement=displacement, Force=load)
-            CSV.write(joinpath(directory_name, "partialSolve.csv"), data_frame)
+            CSV.write(joinpath(save_directory, "partialSolve.csv"), data_frame)
         end
 
         global δv = min(δv * growth_rate, δv_max)
@@ -256,7 +263,7 @@ tock()
 
 ## Results
 # Write File
-writevtk(Ω, joinpath(directory_name, "fullSolve.vtu"),
+writevtk(Ω, joinpath(save_directory, "fullSolve.vtu"),
     cellfields=["uh" => uh, "s" => sh, "epsi" => ε(uh), "sigma" => σ ∘ ε(uh)])
 
 # Plotting
@@ -269,4 +276,4 @@ plt.grid()
 display(gcf())
 
 data_frame = DataFrame(Displacement=displacement, Force=load)
-CSV.write(joinpath(directory_name, "fullSolve.csv"), data_frame)
+CSV.write(joinpath(save_directory, "fullSolve.csv"), data_frame)

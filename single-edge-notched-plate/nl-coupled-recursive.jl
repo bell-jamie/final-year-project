@@ -59,22 +59,22 @@ function newEnergyState(ψ_plus_prev_in, ψ_plus_in)
     end
 end
 
-function stepPhaseField(sh_in, ψ_plus_prev_in, f_tol)
+function stepPhaseField(sh_in, ψ_plus_prev_in, f_tol, debug)
     res_pf(s, ϕ) = ∫(gc_bulk * ls * ∇(ϕ) ⋅ ∇(s) + 2 * ψ_plus_prev_in * s * ϕ + (gc_bulk / ls) * s * ϕ) * dΩ - ∫((gc_bulk * ϕ) / ls) * dΩ
     jac_pf(s, ds, ϕ) = ∫(gc_bulk * ls * ∇(ϕ) ⋅ ∇(ds) + 2 * ψ_plus_prev_in * ds * ϕ + (gc_bulk / ls) * ds * ϕ) * dΩ
     op_pf = FEOperator(res_pf, jac_pf, U_pf, V0_pf)
-    nls = NLSolver(show_trace=true, method=:newton,
+    nls = NLSolver(show_trace=debug, method=:newton,
         linesearch=BackTracking(), ftol=f_tol, iterations=5)
     sh_out, = solve!(sh_in, FESolver(nls), op_pf)
     return sh_out, norm(residual(op_pf, sh_out), Inf)
 end
 
-function stepDisplacement(uh_in, sh_in, v_app, f_tol)
+function stepDisplacement(uh_in, sh_in, v_app, f_tol, debug)
     U_disp = TrialFESpace(V0_disp, [VectorValue(0.0, v_app), VectorValue(0.0, 0.0)])
     res_disp(u, v) = ∫(ε(v) ⊙ (σMod ∘ (ε(u), ε(uh_in), sh_in))) * dΩ
     jac_disp(u, du, v) = ∫(ε(v) ⊙ (σMod ∘ (ε(du), ε(uh_in), sh_in))) * dΩ
     op_disp = FEOperator(res_disp, jac_disp, U_disp, V0_disp)
-    nls_disp = NLSolver(show_trace=true, method=:newton,
+    nls_disp = NLSolver(show_trace=debug, method=:newton,
         linesearch=BackTracking(), ftol=f_tol, iterations=5)
     uh_out, = solve!(uh_in, FESolver(nls_disp), op_disp)
     return uh_out, norm(residual(op_disp, uh_out), Inf)
@@ -84,21 +84,19 @@ function σ(ε)
     C_mat ⊙ ε
 end
 
-function centre_pad(s::String, total_width::Int; pad_char::Char='-')::String
-    if length(s) >= total_width
-        return s
-    end
-    padding_each_side = (total_width - length(s)) ÷ 2 # calculate padding on each side
-    padded_s = lpad(s, length(s) + padding_each_side, pad_char) # pad left
-    padded_s = rpad(padded_s, total_width, pad_char) # pad right
-    return padded_s
+function fetchTimer()
+    time_current = peektimer()
+    hours = floor(time_current / 3600)
+    minutes = floor((time_current - hours * 3600) / 60)
+    seconds = time_current - hours * 3600 - minutes * 60
+    @sprintf("%02d:%02d:%02d", hours, minutes, seconds)
 end
 
 
 ## Constants
 # Geometry Constants
 const ls = 0.0075
-const vb = 1
+const vb = 1 #?
 
 # Elasticity Constants
 const E = 210e3 # 210 GPa - base units are mm, therefore MPa is the same as N/mm^2
@@ -111,7 +109,7 @@ const η = 1e-15
 
 # Time Step Constants
 const growth_rate = 1.2 # δv can get larger if increment solved with no cutbacks
-const recur_max = 20 # maximum number of recursive steps to minimise PDE residuals
+const max_cycles = 20 # maximum number of recursive steps to minimise PDE residuals
 const tol = 1e-6 # tolerance for PDE residuals
 const δv_min = 1e-7 # minimum displacement increment
 const δv_max = 1e-3 # maximum displacement increment (1e-5)
@@ -168,12 +166,11 @@ push!(displacement, 0.0)
 ψ_plus_prev = CellState(0.0, dΩ)
 
 # IO
-now = Dates.now()
-formatted_date = Dates.format(now, "yyyy-mm-dd_HH-MM")
-save_directory = joinpath(@__DIR__, "nl-coupled-recursive-save", formatted_date)
+date = Dates.format(Dates.now(), "yyyy-mm-dd_HH-MM")
+save_directory = joinpath(splitext(@__FILE__)[1] * "-files", date)
 
 if !isdir(save_directory)
-    mkdir(save_directory)
+    mkpath(save_directory)
 end
 
 tick()
@@ -183,28 +180,21 @@ tick()
 while v_app .< v_app_max
     global v_app += δv # apply increment
     
-    @printf("\n%s\n", centre_pad(" Step: $count ", 40))
-    @printf("%s\n\n", centre_pad(" Displacement: $v_app m ", 40)) # i need to develop a way to format this in scientific notation with padding
+    #@printf("\n%s\n", centre_pad(" Step: $count ", 40))
+    #@printf("%s\n\n", centre_pad(" Displacement: $v_app m ", 40)) # i need to develop a way to format this in scientific notation with padding
     # maybe standalone print function that handles the padding? so it could take the same args as printf + the width and would directly call printf
+
+    #@info "Solving for displacement: $displacement_millimetres mm" Step=count Time=fetchTimer()
+    @info "** Step: $count **" Time=fetchTimer() Increment = (string(round(δv * 1e3, digits = 3)) * " mm") Displacement=(string(round(v_app * 1e3, digits = 3)) * " mm") 
 
     converged = false
     cut_back = false
     early_quit = false
 
-    for recur ∈ 1:recur_max
-        @printf("%s\n", centre_pad(" Cycle: $recur ", 40))
-        @printf("%s\n\n", centre_pad(" Increment: $δv m ", 40)) # why are we printing increment each time?
-        # maybe print residual tolerance?
-
-        # Solve Phase Field
-        @printf("%s\n", centre_pad(" Solving Phase-Field ", 40))
-        global sh, pf_residual = stepPhaseField(sh, ψ_plus_prev, tol)
-        @printf("%s\n\n", centre_pad(" Residual: $pf_residual", 40)) # i would like to round the residual at some point
-
-        # Solve Displacement Field
-        @printf("%s\n", centre_pad(" Solving Displacement Field ", 40))
-        global uh, disp_residual = stepDisplacement(uh, sh, v_app, tol)
-        @printf("%s\n\n", centre_pad(" Residual: $disp_residual", 40))
+    for cycle ∈ 1:max_cycles
+        global sh, pf_residual = stepPhaseField(sh, ψ_plus_prev, tol, false)
+        global uh, disp_residual = stepDisplacement(uh, sh, v_app, tol, false)
+        @info "Cycle: $cycle" S_Residual=@sprintf("%.3e", pf_residual) V_Residual=@sprintf("%.3e", disp_residual)
 
         # Update Energy State
         ψ_pos_in = ψPos ∘ (ε(uh))
@@ -213,20 +203,20 @@ while v_app .< v_app_max
         # Check for convergence
         if pf_residual < tol && disp_residual < tol
             converged = true
-            @printf("PDE residuals converged\n\n")
+            @info "** Step complete **"
+            @printf("\n-------------------------\n\n")
             break
         end
 
         # Check for cutback
-        # I think that an adaptive cutback could be implemented, based on the magnitude of the residual, saving the number of cycles to cut back...
-        if recur == recur_max
-            @printf("Max recursive steps reached - cutting back\n\n")
+        if cycle == max_cycles # I think that an adaptive cutback could be implemented, based on the magnitude of the residual, saving the number of cycles to cut back...
+            @warn "** Max cycles - cutting back **"
             cut_back = true
             v_app -= δv # remove increment
             δv = δv / 2 # halve increment
             # should probably pop() the last energy state otherwise there will be permanent damage not accounted for
             if δv < δv_min
-                @printf("Minimum displacement increment reached - early quit\n\n")
+                @error "** δv < δv_min - solution failed **"
                 early_quit = true
                 break
             end
@@ -235,7 +225,6 @@ while v_app .< v_app_max
 
     if converged
         node_force = sum(∫(n_Γ_load ⋅ (σMod ∘ (ε(uh), ε(uh), sh))) * dΓ_load) * vb
-        #yell = push!(load, node_force[2]) # why yell?
         push!(load, node_force[2])
         push!(displacement, v_app)
 

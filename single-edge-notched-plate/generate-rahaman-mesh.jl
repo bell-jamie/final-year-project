@@ -52,5 +52,5 @@ gmsh.model.mesh.field.setAsBackgroundMesh(11)
 
 gmsh.model.geo.synchronize()
 gmsh.model.mesh.generate(2)
-gmsh.write("notchedPlateTriangular.msh")
+gmsh.write(joinpath(@__DIR__, "notchedPlateTriangular.msh"))
 gmsh.finalize()

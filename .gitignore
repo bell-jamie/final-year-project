@@ -1,0 +1,8 @@
+# Ignore save directories
+*/*-files/
+
+# Ignore .DS_Store
+.DS_Store
+
+# Ignore .vscode
+.vscode

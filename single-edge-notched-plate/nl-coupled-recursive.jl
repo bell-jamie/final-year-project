@@ -27,7 +27,7 @@ const growth_rate = 1.2
 const max_cycles = 20
 const tol = 1e-6
 const δv_min = 1e-7
-const δv_max = 1e-3
+const δv_max = 1e-5
 const v_app_max = 7e-3
 
 ## Model Setup

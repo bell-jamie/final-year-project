@@ -1,12 +1,12 @@
-function elasFourthOrderConstTensor(E::Float64, ν::Float64, PlanarState::String)
-    if PlanarState == "PlaneStrain"
+function elas_fourth_order_const_tensor(E::Float64, ν::Float64, planar_state::String)
+    if planar_state == "PlaneStrain"
         C1111 = E / (1 - ν * ν)
         C1122 = (E * ν) / (1 - ν * ν)
         C1112 = 0.0
         C2222 = E / (1 - ν * ν)
         C2212 = 0.0
         C1212 = E / (2 * (1 + ν))
-    elseif PlanarState == "PlaneStress"
+    elseif planar_state == "PlaneStress"
         C1111 = (E * (1 - ν * ν)) / ((1 + ν) * (1 - ν - 2 * ν * ν))
         C1122 = (E * ν) / (1 - ν - 2 * ν * ν)
         C1112 = 0.0
@@ -14,14 +14,14 @@ function elasFourthOrderConstTensor(E::Float64, ν::Float64, PlanarState::String
         C2212 = 0.0
         C1212 = E / (2 * (1 + ν))
     else
-        error("Invalid PlanarState")
+        error("Invalid planar state")
     end
     SymFourthOrderTensorValue(C1111, C1112, C1122,
         C1112, C1212, C2212,
         C1122, C2212, C2222)
 end
 
-function volumetricDeviatoricProjection()
+function volumetric_deviatoric_projection()
     I2 = SymTensorValue{2,Float64}(1.0, 0.0, 1.0)
     I4 = I2 ⊗ I2
     I4_sym = one(SymFourthOrderTensorValue{2,Float64})
@@ -30,8 +30,7 @@ function volumetricDeviatoricProjection()
     return I4_vol, I4_dev
 end
 
-#function σMod(ε::SymTensorValue{2, Float64, 3}, ε_in::SymTensorValue{2, Float64, 3}, s_in::Float64)
-function σMod(ε, ε_in, s_in)
+function σ_mod(ε, ε_in, s_in)
     if tr(ε_in) >= 0
         (s_in^2 + η) * σ(ε)
     else
@@ -39,75 +38,73 @@ function σMod(ε, ε_in, s_in)
     end
 end
 
-#function ψPos(ε_in::SymTensorValue{2, Float64, 3})
-function ψPos(ε_in)
-    if tr(ε_in) >= 0
-        0.5 * (ε_in ⊙ σ(ε_in))
+function ψ_pos(ε)
+    if tr(ε) >= 0
+        0.5 * (ε ⊙ σ(ε))
     else
-        0.5 * (I4_dev ⊙ σ(ε_in) ⊙ (I4_dev ⊙ ε_in))
+        0.5 * (I4_dev ⊙ σ(ε) ⊙ (I4_dev ⊙ ε))
     end
 end
 
-function newEnergyState(ψ_plus_prev_in, ψ_plus_in)
-    (true, max(ψ_plus_in, ψ_plus_prev_in))
+function new_energy_state(ψ_prev, ψ_current)
+    (true, max(ψ_prev, ψ_current))
 end
 
-function stepPhaseField(sh_in, ψ_plus_prev_in, f_tol, debug)
-    res_pf(s, ϕ) = ∫(gc_bulk * ls * ∇(ϕ) ⋅ ∇(s) + 2 * ψ_plus_prev_in * s * ϕ +
+function step_phase_field(phase, ψ_prev, f_tol, debug)
+    res(s, ϕ) = ∫(gc_bulk * ls * ∇(ϕ) ⋅ ∇(s) + 2 * ψ_prev * s * ϕ +
         (gc_bulk / ls) * s * ϕ) * dΩ - ∫((gc_bulk / ls) * ϕ) * dΩ
-    jac_pf(s, ds, ϕ) = ∫(gc_bulk * ls * ∇(ϕ) ⋅ ∇(ds) + 2 * ψ_plus_prev_in * ds * ϕ +
+    jac(s, ds, ϕ) = ∫(gc_bulk * ls * ∇(ϕ) ⋅ ∇(ds) + 2 * ψ_prev * ds * ϕ +
         (gc_bulk / ls) * ds * ϕ) * dΩ
-    op_pf = FEOperator(res_pf, jac_pf, U_pf, V0_pf)
+    op = FEOperator(res, jac, phase.U, phase.V0)
     nls = NLSolver(show_trace=debug, method=:newton,
         linesearch=BackTracking(), ftol=f_tol, iterations=5)
-    sh_out, = solve!(sh_in, FESolver(nls), op_pf)
-    return sh_out, norm(residual(op_pf, sh_out), Inf)
+    phase.sh, = solve!(phase.sh, FESolver(nls), op)
+    return phase.sh, norm(residual(op, phase.sh), Inf)
 end
 
-function stepDisplacement(uh_in, sh_in, v_app, f_tol, debug)
-    U_disp = TrialFESpace(V0_disp, applyBCs(v_app))
-    res_disp(u, v) = ∫(ε(v) ⊙ (σMod ∘ (ε(u), ε(uh_in), sh_in))) * dΩ
-    jac_disp(u, du, v) = ∫(ε(v) ⊙ (σMod ∘ (ε(du), ε(uh_in), sh_in))) * dΩ
-    op_disp = FEOperator(res_disp, jac_disp, U_disp, V0_disp)
-    nls_disp = NLSolver(show_trace=debug, method=:newton,
-        linesearch=BackTracking(), ftol=f_tol, iterations=5)
-    uh_out, = solve!(uh_in, FESolver(nls_disp), op_disp)
-    return uh_out, norm(residual(op_disp, uh_out), Inf)
+function step_displacement(dΩ, disp, phase, v_app, f_tol, debug)
+    disp.U = TrialFESpace(disp.V0, applyBCs(v_app))
+    res(u, v) = ∫(ε(v) ⊙ (σ_mod ∘ (ε(u), ε(disp.uh), phase.sh))) * dΩ
+    jac(u, du, v) = ∫(ε(v) ⊙ (σ_mod ∘ (ε(du), ε(disp.uh), phase.sh))) * dΩ
+    op = FEOperator(res, jac, disp.U, disp.V0)
+    nls = NLSolver(show_trace = debug, method = :newton,
+        linesearch = BackTracking(), ftol = f_tol, iterations = 5)
+    disp.uh, = solve!(disp.uh, FESolver(nls), op_disp)
+    return disp.uh, norm(residual(op, disp.uh), Inf)
 end
 
-function stepCoupledFields(sh_in, uh_in, ψ_plus_prev_in, v_app, f_tol, debug)
-    U_disp = TrialFESpace(V0_disp, applyBCs(v_app))
-    V0_coupled = MultiFieldFESpace([V0_pf, V0_disp])
-    U_coupled = MultiFieldFESpace([U_pf, U_disp])
-    res_coupled((s, u), (ϕ, v)) = ∫(gc_bulk * ls * ∇(ϕ) ⋅ ∇(s) +
-        2 * ψ_plus_prev_in * s * ϕ + (gc_bulk / ls) * s * ϕ) * dΩ -
+function step_coupled_fields(dΩ, phase, disp, ψ_prev, v_app, f_tol, debug)
+    disp.U = TrialFESpace(disp.V0, apply_BCs(v_app))
+    V0 = MultiFieldFESpace([phase.V0, disp.V0])
+    U = MultiFieldFESpace([phase.U, disp.U])
+    res((s, u), (ϕ, v)) = ∫(gc_bulk * ls * ∇(ϕ) ⋅ ∇(s) +
+        2 * ψ_prev * s * ϕ + (gc_bulk / ls) * s * ϕ) * dΩ -
         ∫((gc_bulk / ls) * ϕ) * dΩ +
-        ∫(ε(v) ⊙ (σMod ∘ (ε(u), ε(uh), sh))) * dΩ
-    jac_coupled((s, u), (ds, du), (ϕ, v)) = ∫(gc_bulk * ls * ∇(ϕ) ⋅ ∇(ds) +
-        2 * ψ_plus_prev_in * ds * ϕ + (gc_bulk / ls) * ds * ϕ) * dΩ +
-        ∫(ε(v) ⊙ (σMod ∘ (ε(du), ε(uh), sh))) * dΩ
-    op_coupled = FEOperator(res_coupled, jac_coupled, U_coupled, V0_coupled)
-    nls_coupled = NLSolver(show_trace=debug, method=:newton,
-        linesearch=BackTracking(), ftol=f_tol, iterations=20) #20 iterations!
-    sh_uh_out, = solve!(MultiFieldFEFunction([get_free_dof_values(sh_in);
-        get_free_dof_values(uh_in)], V0_coupled, [sh_in; uh_in]),
-        FESolver(nls_coupled), op_coupled)
-    return sh_uh_out[1], sh_uh_out[2], norm(residual(op_coupled, sh_uh_out), Inf)
+        ∫(ε(v) ⊙ (σ_mod ∘ (ε(u), ε(disp.uh), phase.sh))) * dΩ
+    jac((s, u), (ds, du), (ϕ, v)) = ∫(gc_bulk * ls * ∇(ϕ) ⋅ ∇(ds) +
+        2 * ψ_prev * ds * ϕ + (gc_bulk / ls) * ds * ϕ) * dΩ +
+        ∫(ε(v) ⊙ (σ_mod ∘ (ε(du), ε(disp.uh), phase.sh))) * dΩ
+    op = FEOperator(res, jac, U, V0)
+    nls = NLSolver(show_trace = debug, method = :newton,
+        linesearch = BackTracking(), ftol = f_tol, iterations = NL_iters)
+    sh_uh, = solve!(MultiFieldFEFunction([get_free_dof_values(phase.sh);
+        get_free_dof_values(disp.uh)], V0, [phase.sh; disp.uh]), FESolver(nls), op)
+    return sh_uh[1], sh_uh[2], norm(residual(op, sh_uh), Inf)
 end
 
-function applyBCs(V_app)
-    bc_bool = fill(false, 2 * length(bcs.tags))
-    for position ∈ bcs.positions
-        bc_bool[position] = true
+function apply_BCs(v_app)
+    BC_bool = fill(false, 2 * length(BCs.tags))
+    for position ∈ BCs.positions
+        BC_bool[position] = true
     end
     conditions = []
-    for pair ∈ eachslice(reshape(bc_bool, 2, :), dims=2)
+    for pair ∈ eachslice(reshape(BC_bool, 2, :), dims = 2)
         if pair[1] && pair[2]
-            push!(conditions, VectorValue(V_app, V_app))
+            push!(conditions, VectorValue(v_app, v_app))
         elseif pair[1] && !pair[2]
-            push!(conditions, VectorValue(V_app, 0.0))
+            push!(conditions, VectorValue(v_app, 0.0))
         elseif !pair[1] && pair[2]
-            push!(conditions, VectorValue(0.0, V_app))
+            push!(conditions, VectorValue(0.0, v_app))
         else
             push!(conditions, VectorValue(0.0, 0.0))
         end
@@ -119,25 +116,25 @@ function σ(ε)
     C ⊙ ε
 end
 
-function constructPhaseFieldSpace()
-    reffe_pf = ReferenceFE(lagrangian, Float64, order)
-    V0_pf = TestFESpace(model, reffe_pf, conformity=:H1)
-    U_pf = TrialFESpace(V0_pf)
-    sh = FEFunction(V0_pf, ones(num_free_dofs(V0_pf)))
-    return U_pf, V0_pf, sh
+function construct_spaces(model::DiscreteModel)
+    reffe = ReferenceFE(lagrangian, Float64, order)
+    test = TestFESpace(model, reffe, conformity=:H1)
+    trial = TrialFESpace(test)
+    field = FEFunction(test, ones(num_free_dofs(test)))
+    return PhaseFieldStruct(test, trial, field)
 end
 
-#function constructDisplacementFieldSpace(tags::Array{String}, masks::Array{Tuple{Bool,Bool}})
-function constructDisplacementFieldSpace(tags, masks)
-    reffe_disp = ReferenceFE(lagrangian, VectorValue{2,Float64}, order)
-    V0_disp = TestFESpace(model, reffe_disp, conformity=:H1,
+function construct_spaces(model::DiscreteModel, tags::Array{String}, masks::Array{Tuple{Bool, Bool}})
+    reffe = ReferenceFE(lagrangian, VectorValue{2,Float64}, order)
+    test = TestFESpace(model, reffe, conformity=:H1,
         dirichlet_tags=tags,
         dirichlet_masks=masks)
-    uh = zero(V0_disp)
-    return V0_disp, uh
+    trial = TrialFESpace(test)
+    field = zero(test)
+    return DispFieldStruct(test, trial, field)
 end
 
-function fetchTimer()
+function fetch_timer()
     time_current = peektimer()
     hours = floor(time_current / 3600)
     minutes = floor((time_current - hours * 3600) / 60)
@@ -145,7 +142,7 @@ function fetchTimer()
     @sprintf("%02d:%02d:%02d", hours, minutes, seconds)
 end
 
-function createSaveDirectory(filename::String)
+function create_save_directory(filename::String)
     date = Dates.format(Dates.now(), "yyyy-mm-dd_HH-MM")
     save_directory = joinpath(splitext(filename)[1] * "-files", date)
 
@@ -155,10 +152,10 @@ function createSaveDirectory(filename::String)
     save_directory
 end
 
-function nonLinearRecursive()
+function NL_coupled_recursive()
     global count = 1
     global δv = δv_max
-    global v_app = 0.0 # change intial displacement to a large jump
+    global v_app = v_init
     global load = Float64[]; push!(load, 0.0)
     global displacement = Float64[]; push!(displacement, 0.0)
     global ψ_plus_prev = CellState(0.0, dΩ)
@@ -195,7 +192,7 @@ function nonLinearRecursive()
                 push!(load, node_force[2])
                 push!(displacement, v_app)
 
-                if mod(count, 1) == 0 # write every 10th iteration
+                if mod(count, 1) == 0 # write every nth iteration
                     writevtk(Ω, joinpath(save_directory, "partialSolve$count.vtu"),
                         cellfields=["uh" => uh, "s" => sh, "epsi" => ε(uh), "sigma" => σ ∘ ε(uh)])
                 end
@@ -222,15 +219,37 @@ function nonLinearRecursive()
         cellfields=["uh" => uh, "s" => sh, "epsi" => ε(uh), "sigma" => σ ∘ ε(uh)])
 end
 
-function nonLinearCoupled()
-    global count = 1
-    global δv = (δv_max + δv_min) / 2
-    global v_app = 0.0
-    global load = Float64[]; push!(load, 0.0); push!(displacement, 0.0)
-    global ψ_plus_prev = CellState(0.0, dΩ)
-    # to revert to the previous state if the step fails
-    global ψ_prev_step = CellState(0.0, dΩ)
+struct NLCoupledRecursiveProblem # problem struct for keep variables out of global scope
+    E::Float64
+    ν::Float64
+    mesh::String
+    BCTags::Array{String}
+    BCMasks::Array{Tuple{Bool,Bool}}
+    BCPositions::Array{Int}
+end
 
+function NL_coupled_multi_field()
+    # Initialise domain, spaces, measures and boundary conditions
+    model = GmshDiscreteModel(mesh_file)
+    Ω = Triangulation(model)
+    dΩ = Measure(Ω, degree)
+
+    phase = construct_spaces(model)
+    disp = construct_spaces(model, BCs.tags, BCs.masks)
+
+    Γ_load = BoundaryTriangulation(model, tags = "load")
+    dΓ_load = Measure(Γ_load, degree)
+    n_Γ_load = get_normal_vector(Γ_load)
+
+    # Initialise variables, arrays and cell states
+    count = 1
+    δv = δv_max
+    v_app = v_init
+    load = Float64[]; push!(load, 0.0)
+    displacement = Float64[]; push!(displacement, 0.0)
+    ψ_prev = CellState(0.0, dΩ)
+
+    # Main loop
     while v_app .< v_app_max
         if δv < δv_min
             @error "** δv < δv_min - solution failed **"
@@ -238,51 +257,72 @@ function nonLinearCoupled()
             break
         end
 
-        global v_app += δv
-        ψ_plus_prev = ψ_prev_step # remembers the last successful energy state
-        @info "** Step: $count **" Time = fetchTimer() Increment = @sprintf("%.3e mm", δv) Displacement = @sprintf("%.3e mm", v_app)
-
-        # Solve Coupled PDEs
-        global sh, uh, coupled_residual = stepCoupledFields(sh, uh, ψ_plus_prev, v_app, tol, true)
-
-        # Update Energy State
-        ψ_pos_in = ψPos ∘ ε(uh) # current energy state
-        update_state!(newEnergyState, ψ_plus_prev, ψ_pos_in)
-
-        @printf("\nCoupled Residual: %.3e\n", coupled_residual)
+        @info "** Step: $count **" Time = fetch_timer() Increment = @sprintf("%.3e mm", δv) Displacement = @sprintf("%.3e mm", v_app)
+        global phase.sh, disp.uh, coupled_residual = step_coupled_fields(dΩ, phase, disp, ψ_prev, v_app, tol, true)
 
         if coupled_residual < tol
-            ψ_prev_step = ψ_plus_prev # saves energy state for the next step
             @info "** Step complete **"
             @printf("\n------------------------------\n\n")
 
-            node_force = sum(∫(n_Γ_load ⋅ (σMod ∘ (ε(uh), ε(uh), sh))) * dΓ_load)
-            push!(load, node_force[2])
-            push!(displacement, v_app)
+            # Update energy state - max(previous energy, current energy)
+            update_state!(new_energy_state, ψ_prev, ψ_pos ∘ ε(disp.uh))
 
-            if mod(count, 1) == 0 # write every 10th iteration
-                writevtk(Ω, joinpath(save_directory, "partialSolve$count.vtu"),
-                    cellfields=["uh" => uh, "s" => sh, "epsi" => ε(uh), "sigma" => σ ∘ ε(uh)])
-            end
-
-            data_frame = DataFrame(Displacement=displacement, Force=load)
+            node_force = sum(∫(n_Γ_load ⋅ (σ_mod ∘ (ε(disp.uh), ε(disp.uh), phase.sh))) * dΓ_load)
+            push!(load, node_force[2]); push!(displacement, v_app)
+            data_frame = DataFrame(Displacement = displacement, Force = load)
             CSV.write(joinpath(save_directory, "loadDisplacement.csv"), data_frame)
 
-            global δv = min(δv * growth_rate, δv_max)
-            global count += 1
+            if mod(count, 1) == 0 # write every nth iteration
+                writevtk(Ω, joinpath(save_directory, "partialSolve$count.vtu"),
+                    cellfields=["uh" => disp.uh, "s" => phase.sh,
+                    "epsi" => ε(disp.uh), "sigma" => σ ∘ ε(disp.uh)])
+            end
+            
+            δv = min(δv * growth_rate, δv_max) # increase increment
+            v_app += δv # add increment
+            count += 1 # update count
         else
             @warn "** Step failed **"
             @printf("\n------------------------------\n\n")
+
             v_app -= δv # remove increment
             δv = δv / 2 # halve increment
         end
     end
 
     writevtk(Ω, joinpath(save_directory, "fullSolve.vtu"),
-        cellfields=["uh" => uh, "s" => sh, "epsi" => ε(uh), "sigma" => σ ∘ ε(uh)])
+        cellfields=["uh" => disp.uh, "s" => phase.sh,
+        "epsi" => ε(disp.uh), "sigma" => σ ∘ ε(disp.uh)])
 end
 
-mutable struct pfm_problem # this is left here as an idea - it seems that DrWatson.jl fills this purpose
+function plot_load_displacement(title::String)
+    savefile = CSV.File(joinpath(save_directory, "loadDisplacement.csv"))
+    displacement = savefile.Displacement; load = savefile.Force
+
+    plt = plot(displacement * 1e3, load,
+        xlabel="Displacement (mm)",
+        ylabel="Load (N)",
+        title=title,
+        legend=false,
+        grid=true)
+
+    savefig(plt, joinpath(save_directory, "loadDisplacementPlot.png"))
+    display(plt)
+end
+
+mutable struct PhaseFieldStruct
+    U::FESpace
+    V0::FESpace
+    sh::FEFunction
+end
+
+mutable struct DispFieldStruct
+    U::FESpace
+    V0::FESpace
+    uh::FEFunction
+end
+
+mutable struct PFMProblem # this is left here as an idea - it seems that DrWatson.jl fills this purpose
     mesh::String
     E::Float64
     ν::Float64

@@ -1,15 +1,15 @@
-using GridapGmsh
 using Gridap
+using GridapGmsh
 using Gridap.TensorValues
 using Gridap.Fields
 using Gridap.CellData
+using Gridap.Algebra
 using Printf
-using PyPlot
+using Plots
 using TickTock
 using CSV
 using DataFrames
 using LineSearches: BackTracking
-using Gridap.Algebra
 using Dates
 
 include(joinpath(dirname(@__DIR__), "pfm-lib.jl"))
@@ -25,9 +25,10 @@ const η = 1e-15
 
 const growth_rate = 1.2
 const max_cycles = 20
-const tol = 1e-6
+const tol = 1e-5 #1e-6
 const δv_min = 1e-7
 const δv_max = 1e-5
+const v_init = 2.5e-3
 const v_app_max = 7e-3
 
 ## Model Setup
@@ -50,18 +51,9 @@ n_Γ_load = get_normal_vector(Γ_load)
 save_directory = createSaveDirectory(@__FILE__)
 
 tick()
-nonLinearRecursive()
+nonLinearCoupledRecursive()
 tock()
 
+plotLoadDisplacement("Single Edge Notched Plate - NL Coupled Recursive")
+
 # let's plot the sum of the energy state with each iteration to see if the two methods are different
-
-savefile = CSV.File(joinpath(save_directory, "loadDisplacement.csv"))
-displacement = savefile.Displacement
-load = savefile.Force
-
-plt.plot(displacement * 1e3, load)
-plt.xlabel("Displacement (mm)")
-plt.ylabel("Load (N)")
-plt.title("Single Edge Notched Plate - Non-Linear Recursive")
-plt.grid()
-display(gcf())

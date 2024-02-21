@@ -27,16 +27,16 @@ const η = 1e-15
 
 const growth_rate = 1.2
 const NL_iters = 20
-const tol = 2e-12
-const δv_min = 1e-10
-const δv_max = 1e-5
+const tol = 2e-12 # 1e-12
+const δv_min = 1e-10 # 1e-7
+const δv_max = 1e-6 # 1e-5
 const v_init = 2.5e-3
-const v_app_max = 15e-3
+const v_app_max = 10e-3
 
 ## Model Setup
 mesh_file = joinpath(@__DIR__, "notchedPlateTriangular.msh")
 save_directory = create_save_directory(@__FILE__)
-BCs = boundary_conditions(["load", "fixed"], [(true, true), (true, true)], [2])
+BCs = BoundaryConditions(["load", "fixed"], [(true, true), (true, true)], [2])
 order = 2; degree = 2 * order
 
 ## Run

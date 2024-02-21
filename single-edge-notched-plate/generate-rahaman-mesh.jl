@@ -1,7 +1,6 @@
-using gmsh_jll
-include(gmsh_jll.gmsh_api)
+import Gmsh: gmsh
 
-const ls = 0.0150 # 0.0075
+const ls = 0.0075 # 0.0075
 const L = 1
 const H = 1
 const CP = H/2
@@ -31,14 +30,11 @@ gmsh.model.geo.addLine(5, 6, 5)
 gmsh.model.geo.addLine(6, 7, 6)
 gmsh.model.geo.addLine(7, 8, 7)
 gmsh.model.geo.addLine(8, 1, 8)
-gmsh.model.geo.addCurveLoop([1,2,3,4,5,6,7,8],1) 
+gmsh.model.geo.addCurveLoop([1,2,3,4,5,6,7,8], 1) 
 gmsh.model.geo.addPlaneSurface([1], 1)
-gmsh.model.addPhysicalGroup(2, [1],1)
-gmsh.model.addPhysicalGroup(1, [1],1)
-gmsh.model.addPhysicalGroup(1, [3],2)
-gmsh.model.setPhysicalName(2, 1, "domain")
-gmsh.model.setPhysicalName(1, 1, "fixed")
-gmsh.model.setPhysicalName(1, 2, "load")
+gmsh.model.geo.addPhysicalGroup(2, [1], 1, "domain")
+gmsh.model.geo.addPhysicalGroup(1, [1], 1, "fixed")
+gmsh.model.geo.addPhysicalGroup(1, [3], 2, "load")
 
 # gmsh 4.13.0 manual - page 38, field mesh
 

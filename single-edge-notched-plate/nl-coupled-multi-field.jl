@@ -28,8 +28,8 @@ const η = 1e-15
 const growth_rate = 1.2
 const NL_iters = 20
 const tol = 2e-12 # 1e-12
-const δv_min = 1e-10 # 1e-7
-const δv_max = 1e-6 # 1e-5
+const δv_min = 1e-7 # 1e-7
+const δv_max = 1e-5 # 1e-5
 const v_init = 2.5e-3
 const v_app_max = 10e-3
 
@@ -46,3 +46,6 @@ tock()
 
 ## Plot
 plot_load_displacement("Single Edge Notched Plate - NL Coupled Multi-Field")
+plot_damage_displacement("Single Edge Notched Plate - NL Coupled Multi-Field")
+plot_increment_displacement("Single Edge Notched Plate - NL Coupled Multi-Field")
+plot_energy_displacement("Single Edge Notched Plate - NL Coupled Multi-Field")

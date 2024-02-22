@@ -56,8 +56,8 @@ function step_phase_field(dΩ, phase, ψ_prev, f_tol, debug)
     jac(s, ds, ϕ) = ∫(gc_bulk * ls * ∇(ϕ) ⋅ ∇(ds) + 2 * ψ_prev * ds * ϕ +
         (gc_bulk / ls) * ds * ϕ) * dΩ
     op = FEOperator(res, jac, phase.U, phase.V0)
-    nls = NLSolver(show_trace=debug, method=:newton,
-        linesearch=BackTracking(), ftol=f_tol, iterations=5)
+    nls = NLSolver(show_trace = debug, method = :newton,
+        linesearch = BackTracking(), ftol = f_tol, iterations = 5)
     phase.sh, = solve!(phase.sh, FESolver(nls), op)
     return phase.sh, norm(residual(op, phase.sh), Inf)
 end
@@ -113,6 +113,19 @@ function apply_BCs(v_app)
     conditions
 end
 
+function increment(δv::Float64)
+    min(δv_max, δv * growth_rate)
+end
+
+function increment(δv::Float64, history::Array{Float64}, aggression::Float64)
+    # this needs momentum as it can't see ahead and therefore should be cautious // or we just let cutbacks deal with it
+    current = history[end]
+    previous = history[end - 1]
+    grad_norm = (abs(previous - current) / previous) / δv
+    @printf("Grad norm: %.3e\n", grad_norm)
+    min(increment(δv), max(δv_min, δv ^ (1 / (aggression * grad_norm))))
+end
+
 function σ(ε)
     C ⊙ ε
 end
@@ -152,6 +165,10 @@ function create_save_directory(filename::String)
     if !isdir(save_directory)
         mkpath(save_directory)
     end
+
+    # Copy input file to save directory as .txt
+    cp(filename, joinpath(save_directory, (splitext(basename(filename))[1] * ".txt")))
+
     save_directory
 end
 
@@ -171,10 +188,14 @@ function NL_coupled_recursive()
     # Initialise variables, arrays and cell states
     count = 1
     δv = δv_max
-    v_app = v_init
-    load = Float64[]; push!(load, 0.0)
-    displacement = Float64[]; push!(displacement, 0.0)
+    v_app = δv #v_app = v_init
+    load = Float64[];           push!(load, 0.0)
+    displacement = Float64[];   push!(displacement, 0.0)
+    energy= Float64[];          push!(energy, sum(∫(ψ_pos ∘ ε(disp.uh)) * dΩ))
+    damage = Float64[];         push!(damage, sum(∫(phase.sh) * dΩ))
     ψ_prev_stable = CellState(0.0, dΩ)
+
+    increments = Float64[]; push!(increments, v_app)
 
     # Main loop
     while v_app .< v_app_max
@@ -197,22 +218,35 @@ function NL_coupled_recursive()
 
             # Check for convergence
             if pf_residual < tol && disp_residual < tol
-                ψ_prev_stable = ψ_prev # saves energy state for the next step
                 @info "** Step complete **"
                 @printf("\n------------------------------\n\n")
+                
+                ψ_prev_stable = ψ_prev # saves energy state for the next step
+                ψ_sum = sum(∫(ψ_pos ∘ ε(disp.uh)) * dΩ); push!(energy, ψ_sum)
+                s_sum = sum(∫(phase.sh) * dΩ); push!(damage, s_sum)
+
+                push!(increments, δv)
+                δv = increment(δv, damage, 1e-1)
+                @printf("Increment: %.3e\n", δv)
 
                 node_force = sum(∫(n_Γ_load ⋅ (σ_mod ∘ (ε(disp.uh), ε(disp.uh), phase.sh))) * dΓ_load)
                 push!(load, node_force[2]); push!(displacement, v_app)
-                data_frame = DataFrame(Displacement = displacement, Force = load)
-                CSV.write(joinpath(save_directory, "loadDisplacement.csv"), data_frame)
+                data_frame = DataFrame(Displacement = displacement, Increment = increments,
+                    Force = load, Energy = energy, Damage = damage)
 
-                if mod(count, 1) == 0 # write every nth iteration
+                try
+                    CSV.write(joinpath(save_directory, "log.csv"), data_frame)
+                catch
+                    @error "Error writing to CSV file"
+                end
+
+                if mod(count, 10) == 0 # write every nth iteration
                     writevtk(Ω, joinpath(save_directory, "partialSolve$count.vtu"),
                         cellfields = ["uh" => disp.uh, "s" => phase.sh,
                         "epsi" => ε(disp.uh), "sigma" => σ ∘ ε(disp.uh)])
                 end
 
-                δv = min(δv * growth_rate, δv_max)
+                #δv = increment(δv, energy, 1.0); push!(increments, δv)
                 v_app += δv
                 count += 1
                 break
@@ -250,8 +284,11 @@ function NL_coupled_multi_field()
     count = 1
     δv = δv_max
     v_app = v_init
-    load = Float64[]; push!(load, 0.0)
-    displacement = Float64[]; push!(displacement, 0.0)
+    load = Float64[];           push!(load, 0.0)
+    displacement = Float64[];   push!(displacement, 0.0)
+    increments = Float64[];     push!(increments, v_init)
+    energy= Float64[];          push!(energy, sum(∫(ψ_pos ∘ ε(disp.uh)) * dΩ))
+    damage = Float64[];         push!(damage, sum(∫(phase.sh) * dΩ))
     ψ_prev = CellState(0.0, dΩ)
 
     # Main loop
@@ -272,12 +309,23 @@ function NL_coupled_multi_field()
             # Update energy state - max(previous energy, current energy)
             update_state!(new_energy_state, ψ_prev, ψ_pos ∘ ε(disp.uh))
 
+            ψ_sum = sum(∫(ψ_pos ∘ ε(disp.uh)) * dΩ);    push!(energy, ψ_sum)
+            s_sum = sum(∫(phase.sh) * dΩ);              push!(damage, s_sum)
+            push!(increments, δv)
+
             node_force = sum(∫(n_Γ_load ⋅ (σ_mod ∘ (ε(disp.uh), ε(disp.uh), phase.sh))) * dΓ_load)
             push!(load, node_force[2]); push!(displacement, v_app)
-            data_frame = DataFrame(Displacement = displacement, Force = load)
-            CSV.write(joinpath(save_directory, "loadDisplacement.csv"), data_frame)
 
-            if mod(count, 1) == 0 # write every nth iteration
+            data_frame = DataFrame(Displacement = displacement, Increments = increments,
+                Force = load, Energy = energy, Damage = damage)
+
+            try
+                CSV.write(joinpath(save_directory, "log.csv"), data_frame)
+            catch
+                @error "Error writing to CSV file"
+            end
+
+            if mod(count, 10) == 0 # write every nth iteration
                 writevtk(Ω, joinpath(save_directory, "partialSolve$count.vtu"),
                     cellfields = ["uh" => disp.uh, "s" => phase.sh,
                     "epsi" => ε(disp.uh), "sigma" => σ ∘ ε(disp.uh)])
@@ -301,7 +349,7 @@ function NL_coupled_multi_field()
 end
 
 function plot_load_displacement(title::String)
-    savefile = CSV.File(joinpath(save_directory, "loadDisplacement.csv"))
+    savefile = CSV.File(joinpath(save_directory, "log.csv"))
     displacement = savefile.Displacement; load = savefile.Force
 
     plt = plot(displacement * 1e3, load,
@@ -312,6 +360,51 @@ function plot_load_displacement(title::String)
         grid=true)
 
     savefig(plt, joinpath(save_directory, "loadDisplacementPlot.png"))
+    display(plt)
+end
+
+function plot_damage_displacement(title::String)
+    savefile = CSV.File(joinpath(save_directory, "log.csv"))
+    displacement = savefile.Displacement; damage = savefile.Damage
+
+    plt = plot(displacement * 1e3, 1 .- damage,
+        xlabel="Displacement (mm)",
+        ylabel="Damage",
+        title=title,
+        legend=false,
+        grid=true)
+
+    savefig(plt, joinpath(save_directory, "damageDisplacementPlot.png"))
+    display(plt)
+end
+
+function plot_energy_displacement(title::String)
+    savefile = CSV.File(joinpath(save_directory, "log.csv"))
+    displacement = savefile.Displacement; energy = savefile.Energy
+
+    plt = plot(displacement * 1e3, energy,
+        xlabel="Displacement (mm)",
+        ylabel="Energy",
+        title=title,
+        legend=false,
+        grid=true)
+
+    savefig(plt, joinpath(save_directory, "energyDisplacementPlot.png"))
+    display(plt)
+end
+
+function plot_increment_displacement(title::String)
+    savefile = CSV.File(joinpath(save_directory, "log.csv"))
+    displacement = savefile.Displacement; increment = savefile.Increment
+
+    plt = plot(displacement * 1e3, increment * 1e3,
+        xlabel="Displacement (mm)",
+        ylabel="Increment (mm)",
+        title=title,
+        legend=false,
+        grid=true)
+
+    savefig(plt, joinpath(save_directory, "incrementDisplacementPlot.png"))
     display(plt)
 end
 

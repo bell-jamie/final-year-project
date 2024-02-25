@@ -22,16 +22,16 @@ const C = elas_fourth_order_const_tensor(E, ν, "PlaneStrain")
 const I4_vol, I4_dev = volumetric_deviatoric_projection()
 
 const ls = 0.0075
-const gc_bulk = 2.7
+const Gc = 2.7
 const η = 1e-15
 
 const growth_rate = 1.2
 const NL_iters = 20
 const tol = 2e-12 # 1e-12
 const δv_min = 1e-7 # 1e-7
-const δv_max = 1e-5 # 1e-5
+const δv_max = 1e-4 # 1e-5
 const v_init = 2.5e-3
-const v_app_max = 10e-3
+const v_app_max = 7e-3
 
 ## Model Setup
 mesh_file = joinpath(@__DIR__, "notchedPlateTriangular.msh")
@@ -41,7 +41,7 @@ order = 2; degree = 2 * order
 
 ## Run
 tick()
-NL_coupled_multi_field()
+NL_coupled_multi_field_MOD() # this is being run with a constant step size of 1e-6
 tock()
 
 ## Plot

@@ -6,3 +6,6 @@
 
 # Ignore .vscode
 .vscode
+
+# Ignore meshes
+*.msh

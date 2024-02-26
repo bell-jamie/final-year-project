@@ -37,7 +37,8 @@ const v_app_max = 7e-3
 mesh_file = joinpath(@__DIR__, "notchedPlateTriangular.msh")
 save_directory = create_save_directory(@__FILE__)
 BCs = BoundaryConditions(["load", "fixed"], [(true, true), (true, true)], [2])
-order = 2; degree = 2 * order
+const order = 2
+const degree = 2 * order
 
 # Mac call with: mpiexecjl -n 6 julia linear-segregated-parallel.jl
 # Windows call with: mpiexec -n 6 julia linear-segregated-parallel.jl

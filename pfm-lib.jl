@@ -1,12 +1,12 @@
 function elas_fourth_order_const_tensor(E::Float64, ν::Float64, planar_state::String)
-    if planar_state == "PlaneStrain"
+    if planar_state == "PlaneStress"
         C1111 = E / (1 - ν * ν)
         C1122 = (E * ν) / (1 - ν * ν)
         C1112 = 0.0
         C2222 = E / (1 - ν * ν)
         C2212 = 0.0
         C1212 = E / (2 * (1 + ν))
-    elseif planar_state == "PlaneStress"
+    elseif planar_state == "PlaneStrain"
         C1111 = (E * (1 - ν * ν)) / ((1 + ν) * (1 - ν - 2 * ν * ν))
         C1122 = (E * ν) / (1 - ν - 2 * ν * ν)
         C1112 = 0.0
@@ -50,9 +50,9 @@ function new_energy_state(ψ_prev, ψ_current)
     (true, max(ψ_prev, ψ_current))
 end
 
-function step_phase_field(dΩ, phase, ψ_prev)
-    a(s, ϕ) = ∫(Gc * ls * ∇(ϕ) ⋅ ∇(s) + 2 * ψ_prev * s * ϕ + (Gc / ls) * s * ϕ) * dΩ
-    b(ϕ) = ∫((Gc /ls) * ϕ) * dΩ
+function step_phase_field(dΩ, phase, ψh_prev)
+    a(s, ϕ) = ∫(Gc * ls * ∇(ϕ) ⋅ ∇(s) + 2 * ψh_prev * s * ϕ + (Gc / ls) * s * ϕ) * dΩ
+    b(ϕ) = ∫((Gc / ls) * ϕ) * dΩ
     op = AffineFEOperator(a, b, phase.U, phase.V0)
     solve(op)
 end
@@ -105,7 +105,25 @@ function step_coupled_fields(dΩ, phase, disp, ψ_prev, v_app, f_tol, debug)
         linesearch = BackTracking(), ftol = f_tol, iterations = NL_iters)
     sh_uh, = solve!(MultiFieldFEFunction([get_free_dof_values(phase.sh);
         get_free_dof_values(disp.uh)], V0, [phase.sh; disp.uh]), FESolver(nls), op)
-    return sh_uh[1], sh_uh[2], norm(residual(op, sh_uh), Inf)
+    (sh_uh[1], sh_uh[2], norm(residual(op, sh_uh), Inf))
+end
+
+function step_coupled_fields_parallel(dΩ, phase, disp, ψ_prev, v_app, f_tol, debug)
+    disp.U = TrialFESpace(disp.V0, apply_BCs(v_app))
+    V0 = MultiFieldFESpace([phase.V0, disp.V0])
+    U = MultiFieldFESpace([phase.U, disp.U])
+    res((s, u), (ϕ, v)) = ∫(Gc * ls * ∇(ϕ) ⋅ ∇(s) +
+        2 * ψ_prev * s * ϕ + (Gc / ls) * s * ϕ) * dΩ -
+        ∫((Gc / ls) * ϕ) * dΩ +
+        ∫(ε(v) ⊙ (σ_mod ∘ (ε(u), ε(disp.uh), phase.sh))) * dΩ
+    jac((s, u), (ds, du), (ϕ, v)) = ∫(Gc * ls * ∇(ϕ) ⋅ ∇(ds) +
+        2 * ψ_prev * ds * ϕ + (Gc / ls) * ds * ϕ) * dΩ +
+        ∫(ε(v) ⊙ (σ_mod ∘ (ε(du), ε(disp.uh), phase.sh))) * dΩ
+    op = FEOperator(res, jac, U, V0)
+    nls = PETScNonlinearSolver()
+    sh_uh, = solve!(MultiFieldFEFunction([get_free_dof_values(phase.sh);
+        get_free_dof_values(disp.uh)], V0, [phase.sh; disp.uh]), FESolver(nls), op)
+    (sh_uh[1], sh_uh[2], norm(residual(op, sh_uh), Inf))
 end
 
 function apply_BCs(v_app)
@@ -155,7 +173,7 @@ end
 
 function construct_phase(model)
     reffe = ReferenceFE(lagrangian, Float64, order)
-    test = TestFESpace(model, reffe, conformity=:H1) #,
+    test = TestFESpace(model, reffe, conformity = :H1) #,
         #dirichlet_tags = ["crack"],
         #dirichlet_masks = [true])
     trial = TrialFESpace(test)
@@ -165,12 +183,21 @@ end
 
 function construct_disp(model, tags, masks)
     reffe = ReferenceFE(lagrangian, VectorValue{2,Float64}, order)
-    test = TestFESpace(model, reffe, conformity=:H1,
+    test = TestFESpace(model, reffe, conformity = :H1,
         dirichlet_tags = tags,
         dirichlet_masks = masks)
     trial = TrialFESpace(test)
     field = zero(test)
     return DispFieldStruct(test, trial, field)
+end
+
+function project(q, model, dΩ)
+    reffe = ReferenceFE(lagrangian, Float64, order)
+    V = FESpace(model, reffe, conformity = :L2)
+    a(u, v) = ∫(u * v) * dΩ
+    l(v) = ∫(v * q) * dΩ
+    op = AffineFEOperator(a, l, V, V)
+    solve(op)
 end
 
 function fetch_timer()
@@ -214,7 +241,7 @@ function linear_segregated()
     v_app = δv
     ψ_prev = CellState(0.0, dΩ)
 
-    data_frame = DataFrame(Displacement = Float64[0.0], Increment = Float64[v_app],
+    sim_log = DataFrame(Displacement = Float64[0.0], Increment = Float64[v_app],
         Force = Float64[0.0], Energy = Float64[0.0], Damage = Float64[1.0])
 
     # Main loop
@@ -226,10 +253,14 @@ function linear_segregated()
         @info "** Step: $count **" Time = fetch_timer() Increment = @sprintf("%.3e mm", δv) Displacement = @sprintf("%.3e mm", v_app)
 
         for cycle ∈ 1:max_cycles
-            phase.sh = step_phase_field(dΩ, phase, ψ_prev)
+            ψh_prev = project(ψ_prev, model, dΩ) # re-added this just to make sure it's not the cause of issues
+
+            # while you're in here mucking around with energy states, make sure you add this to the other solvers if necessary - ψ * h * _prev 
+
+            phase.sh = step_phase_field(dΩ, phase, ψh_prev)
             disp.uh = step_disp_field(dΩ, disp, phase, v_app)
 
-            err = abs(sum(∫(Gc * ls * ∇(phase.sh) ⋅ ∇(phase.sh) + 2 * ψ_prev * phase.sh *
+            err = abs(sum(∫(Gc * ls * ∇(phase.sh) ⋅ ∇(phase.sh) + 2 * ψh_prev * phase.sh *
                 phase.sh + (Gc / ls) * phase.sh * phase.sh) * dΩ -
                 ∫((Gc / ls) * phase.sh) * dΩ)) / abs(sum(∫((Gc / ls) * phase.sh) * dΩ))
 
@@ -245,14 +276,16 @@ function linear_segregated()
         @info "** Step complete **"
         @printf("\n------------------------------\n\n")
 
+        # log = update_sim_log(data_frame, v_app, δv, ψ_sum, s_sum, node_force)
+
         ψ_sum = sum(∫(ψ_pos ∘ ε(disp.uh)) * dΩ)
         s_sum = sum(∫(phase.sh) * dΩ)
-        node_force = sum(∫(n_Γ_load ⋅ (σ_mod ∘ (ε(disp.uh), ε(disp.uh), phase.sh))) * dΓ_load)
+        node_force = sum(∫(n_Γ_load ⋅ (σ_mod ∘ (ε(disp.uh), ε(disp.uh), phase.sh))) * dΓ_load) # potentially make these into a function ^^^
 
-        push!(data_frame, (v_app, δv, node_force[2], ψ_sum, s_sum))
+        push!(sim_log, (v_app, δv, node_force[2], ψ_sum, s_sum))
 
         try
-            CSV.write(joinpath(save_directory, "log.csv"), data_frame)
+            CSV.write(joinpath(save_directory, "log.csv"), sim_log) # make this into function
         catch
             @error "Error writing to CSV file"
         end
@@ -533,6 +566,92 @@ function NL_coupled_multi_field()
     writevtk(Ω, joinpath(save_directory, "fullSolve.vtu"),
         cellfields=["uh" => disp.uh, "s" => phase.sh,
         "epsi" => ε(disp.uh), "sigma" => σ ∘ ε(disp.uh)])
+end
+
+function NL_coupled_multi_field_parallel(ranks)
+    options = "-snes_type newtonls -pc_type gamg -snes_monitor"
+    GridapPETSc.with(args=split(options)) do
+        # Initialise domain, spaces, measures and boundary conditions
+        model = GmshDiscreteModel(ranks, mesh_file) # started running without ranks??
+        Ω = Triangulation(model)
+        dΩ = Measure(Ω, degree)
+
+        phase = construct_phase(model)
+        disp = construct_disp(model, BCs.tags, BCs.masks)
+
+        Γ_load = BoundaryTriangulation(model, tags = "load")
+        dΓ_load = Measure(Γ_load, degree)
+        n_Γ_load = get_normal_vector(Γ_load)
+
+        # Initialise variables, arrays and cell states
+        count = 1
+        δv = δv_max
+        v_app = v_init
+        load = Float64[];               push!(load, 0.0)
+        displacement = Float64[];       push!(displacement, 0.0)
+        increments = Float64[];         push!(increments, v_init)
+        energy= Float64[];              push!(energy, sum(∫(ψ_pos ∘ ε(disp.uh)) * dΩ))
+        damage = Float64[];             push!(damage, sum(∫(phase.sh) * dΩ))
+        ψ_prev = CellState(0.0, dΩ)
+
+        # Main loop
+        while v_app < v_app_max
+            if δv < δv_min
+                @error "** δv < δv_min - solution failed **"
+                @printf("\n------------------------------\n\n")
+                break
+            end
+
+            @info "** Step: $count **" Time = fetch_timer() Increment = @sprintf("%.3e mm", δv) Displacement = @sprintf("%.3e mm", v_app)
+            phase.sh, disp.uh, coupled_residual = step_coupled_fields_parallel(dΩ, phase, disp, ψ_prev, v_app, tol, true)
+
+            if coupled_residual < tol
+                @info "** Step complete **"
+                @printf("\n------------------------------\n\n")
+
+                update_state!(new_energy_state, ψ_prev, ψ_pos ∘ ε(disp.uh))
+
+                ψ_sum = sum(∫(ψ_pos ∘ ε(disp.uh)) * dΩ)
+                s_sum = sum(∫(phase.sh) * dΩ)
+                node_force = sum(∫(n_Γ_load ⋅ (σ_mod ∘ (ε(disp.uh), ε(disp.uh), phase.sh))) * dΓ_load) # you can directly use sum()[1]
+
+                push!(energy, ψ_sum)
+                push!(damage, s_sum)
+                push!(load, node_force[2])
+                push!(displacement, v_app)
+                push!(increments, δv)
+
+                data_frame = DataFrame(Displacement = displacement, Increment = increments,
+                    Force = load, Energy = energy, Damage = damage)
+
+                try
+                    CSV.write(joinpath(save_directory, "log.csv"), data_frame)
+                catch
+                    @error "Error writing to CSV file"
+                end
+
+                if mod(count, 10) == 0 # write every nth iteration
+                    writevtk(Ω, joinpath(save_directory, "partialSolve$count.vtu"),
+                        cellfields = ["uh" => disp.uh, "s" => phase.sh,
+                        "epsi" => ε(disp.uh), "sigma" => σ ∘ ε(disp.uh)])
+                end
+                
+                δv = min(δv * growth_rate, δv_max) # increase increment
+                v_app += δv # add increment
+                count += 1 # update count
+            else
+                @warn "** Step failed **"
+                @printf("\n------------------------------\n\n")
+                
+                δv = δv / 2 # halve increment
+                v_app -= δv # remove half increment
+            end
+        end
+
+        writevtk(Ω, joinpath(save_directory, "fullSolve.vtu"),
+            cellfields=["uh" => disp.uh, "s" => phase.sh,
+            "epsi" => ε(disp.uh), "sigma" => σ ∘ ε(disp.uh)])
+    end
 end
 
 function NL_coupled_multi_field_MOD()

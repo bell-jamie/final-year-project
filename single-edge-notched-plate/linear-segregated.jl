@@ -33,8 +33,9 @@ const v_app_max = 7e-3
 ## Model Setup
 mesh_file = joinpath(@__DIR__, "notchedPlateTriangular.msh")
 save_directory = create_save_directory(@__FILE__)
-BCs = BoundaryConditions(["load", "fixed"], [(true, true), (true, true)], [2])
-order = 2; degree = 2 * order
+BCs = BoundaryConditions(["load", "fixed"], [(false, true), (true, true)], [2])
+const order = 1 # Rahaman used linear discretisation
+const degree = 2 * order
 
 ## Run
 tick()

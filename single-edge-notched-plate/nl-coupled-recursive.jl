@@ -37,7 +37,7 @@ const δv_refined = 1e-5
 const v_app_threshold = 5e-3
 
 ## Model Setup
-mesh_file = joinpath(@__DIR__, "notchedPlateTriangular.msh")
+mesh_file = joinpath(@__DIR__, "meshes", "notchedPlateTriangular.msh")
 save_directory = create_save_directory(@__FILE__)
 BCs = BoundaryConditions(["load", "fixed"], [(true, true), (true, true)], [2])
 const order = 2

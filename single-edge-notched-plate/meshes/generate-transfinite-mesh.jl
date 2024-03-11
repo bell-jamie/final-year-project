@@ -50,8 +50,9 @@ gmsh.model.geo.addPhysicalGroup(2, [1], 1, "domain")
 # Generate Mesh
 gmsh.model.geo.synchronize()
 gmsh.model.mesh.generate(2)
-gmsh.fltk.run()
+#gmsh.fltk.run()
 gmsh.write(joinpath(@__DIR__, "notchedPlateTransfinite.msh"))
+gmsh.write(joinpath(@__DIR__, "notchedPlateTransfinite.vtk"))
 gmsh.finalize()
 
 #=

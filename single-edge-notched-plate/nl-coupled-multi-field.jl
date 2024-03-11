@@ -13,7 +13,7 @@ using DataFrames
 using LineSearches: BackTracking
 using Dates
 
-include(joinpath(dirname(@__DIR__), "pfm-lib.jl"))
+include(joinpath("..", "pfm-lib.jl"))
 
 ## Constants
 const E = 210e3

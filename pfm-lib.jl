@@ -1,4 +1,4 @@
-function elas_fourth_order_const_tensor(E::Float64, ν::Float64, planar_state::String)
+function elas_fourth_order_const_tensor(E::Float64, ν::Float64, planar_state::String) # passed test
     if planar_state == "PlaneStress"
         C1111 = E / (1 - ν * ν)
         C1122 = (E * ν) / (1 - ν * ν)
@@ -28,6 +28,10 @@ function volumetric_deviatoric_projection()
     I4_vol = (1.0 / 2) * I4
     I4_dev = I4_sym - I4_vol
     return I4_vol, I4_dev
+end
+
+function σ(ε)
+    C ⊙ ε
 end
 
 function σ_mod(ε, ε_in, s_in)
@@ -167,10 +171,6 @@ function increment(δv::Float64, history::Array{Float64}, aggression::Float64)
     min(increment(δv), max(δv_min, δv ^ (1 / (aggression * grad_norm))))
 end
 
-function σ(ε)
-    C ⊙ ε
-end
-
 function construct_phase(model)
     reffe = ReferenceFE(lagrangian, Float64, order)
     test = TestFESpace(model, reffe, conformity = :H1) #,
@@ -178,7 +178,7 @@ function construct_phase(model)
         #dirichlet_masks = [true])
     trial = TrialFESpace(test)
     field = FEFunction(test, ones(num_free_dofs(test)))
-    return PhaseFieldStruct(test, trial, field)
+    return PhaseFieldStruct(test, trial, field) # V0, U, sh
 end
 
 function construct_disp(model, tags, masks)
@@ -188,7 +188,7 @@ function construct_disp(model, tags, masks)
         dirichlet_masks = masks)
     trial = TrialFESpace(test)
     field = zero(test)
-    return DispFieldStruct(test, trial, field)
+    return DispFieldStruct(test, trial, field) # V0, U, uh
 end
 
 function project(q, model, dΩ)
@@ -257,12 +257,12 @@ function linear_segregated()
 
             # while you're in here mucking around with energy states, make sure you add this to the other solvers if necessary - ψ * h * _prev 
 
-            phase.sh = step_phase_field(dΩ, phase, ψh_prev)
-            disp.uh = step_disp_field(dΩ, disp, phase, v_app)
-
             err = abs(sum(∫(Gc * ls * ∇(phase.sh) ⋅ ∇(phase.sh) + 2 * ψh_prev * phase.sh *
                 phase.sh + (Gc / ls) * phase.sh * phase.sh) * dΩ -
                 ∫((Gc / ls) * phase.sh) * dΩ)) / abs(sum(∫((Gc / ls) * phase.sh) * dΩ))
+
+            phase.sh = step_phase_field(dΩ, phase, ψh_prev)
+            disp.uh = step_disp_field(dΩ, disp, phase, v_app)
 
             @info "Cycle: $cycle" Relative_Error = @sprintf("%.3e", err)
 
@@ -801,14 +801,14 @@ function plot_increment_displacement(title::String)
 end
 
 mutable struct PhaseFieldStruct
-    U::FESpace
     V0::FESpace
+    U::FESpace
     sh::FEFunction
 end
 
 mutable struct DispFieldStruct
-    U::FESpace
     V0::FESpace
+    U::FESpace
     uh::FEFunction
 end
 

@@ -11,7 +11,7 @@ using CSV
 using DataFrames
 using Dates
 
-include(joinpath(dirname(@__DIR__), "pfm-lib.jl"))
+include(joinpath("..", "pfm-lib.jl"))
 
 ## Constants
 const E = 210e3
@@ -31,7 +31,7 @@ const v_app_threshold = 5e-3
 const v_app_max = 7e-3
 
 ## Model Setup
-mesh_file = joinpath(@__DIR__, "meshes", "notchedPlateTriangular.msh")
+mesh_file = joinpath(@__DIR__, "meshes", "notchedPlateRahaman.msh")
 save_directory = create_save_directory(@__FILE__)
 BCs = BoundaryConditions(["load", "fixed"], [(false, true), (true, true)], [2])
 const order = 1 # Rahaman used linear discretisation

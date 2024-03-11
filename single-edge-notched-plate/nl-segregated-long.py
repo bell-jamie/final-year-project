@@ -26,34 +26,16 @@ def main():
     parser.add_argument('--version', action = 'version', version = '%(prog)s')
     options = parser.parse_args()
 
-    from sfepy.mesh.mesh_generators import gen_block_mesh
-
-    # for generating the mesh, install MESHIO to go from .msh -> .vtk
-    # already installed as sfepy dependency
-    # meshio convert    input.msh output.vtk 
-
-    length = (100) * 1e-3 # beam length in (mm) m
-    thickness = (5) * 1e-3 # beam thickness in (mm) m
-    element_length = (0.5) * 1e-3 # element length in (mm) m
-
     E = 70.0e9 # Young's modulus
     nu = 0.33 # Poisson's ratio
 
     order = 2 # order of element interpolation
+    degree = 2 * order
 
-    mesh = gen_block_mesh((length, thickness), (length / element_length, thickness / element_length), (length / 2, thickness / 2), mat_id = 0, name = 'beam', coors = None, verbose = True)
-    #mesh = Mesh.from_file(data_dir + '/meshes/2d/rectangle_tri.mesh')
-    domain = FEDomain('domain', mesh)
-
-    min_x, max_x = domain.get_mesh_bounding_box()[:,0] # bounding box for selecting edges
-    eps = 1e-8 * (max_x - min_x)
-    omega = domain.create_region('Omega', 'all') # whole domain
-    gamma1 = domain.create_region('Gamma1',
-                                  'vertices in x < %.10f' % (min_x + eps),
-                                  'facet') # gamma 1 region
-    gamma2 = domain.create_region('Gamma2',
-                                  'vertices in x > %.10f' % (max_x - eps),
-                                  'facet') # gamma 2 region
+    mesh = Mesh.from_file('single-edge-notched-plate/plate.msh')
+    omega = FEDomain('domain', mesh)
+    gamma1 = omega.create_region('fixed', 'vertices in group 1', 'facet')
+    gamma2 = omega.create_region('load', 'vertices in group 2', 'facet')
     
     field = Field.from_args('fu', np.float64, 'vector', omega,
                             approx_order = order)
@@ -65,15 +47,13 @@ def main():
 
     m = Material('m', D = stiffness_from_lame(dim = 2, lam = lam, mu = mu)) # linear elastic material
     f = Material('f', val = [[0.0], [0.0]]) # volume force constant column vector
-    force = Material('force', val = [[0.0], [-5e3/thickness]]) # distributed force vector
 
     integral = Integral('i', order = 2 * order) # numerical quadrature for integration
 
     t1 = Term.new('dw_lin_elastic(m.D, v, u)',
                   integral, omega, m = m, v = v, u = u)
     t2 = Term.new('dw_volume_lvf(f.val, v)', integral, omega, f = f, v = v)
-    t3 = Term.new('dw_surface_ltr(force.val, v)', integral, gamma2, force = force, v = v)
-    eq1 = Equation('balance', t1 + t2 - t3)
+    eq1 = Equation('balance', t1 + t2)
     #eq2 = Equation('distributed_force', t3)
     eqs = Equations([eq1])
 

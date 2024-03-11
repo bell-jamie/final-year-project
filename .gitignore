@@ -1,5 +1,6 @@
 # Ignore save directories
 */*-files/
+*/files-*/
 
 # Ignore .DS_Store
 .DS_Store
@@ -7,3 +8,8 @@
 # Ignore .vscode
 .vscode
 
+# Ignore zed pyright config
+pyrightconfig.json
+
+# Ignore __pycache__
+*/__*__

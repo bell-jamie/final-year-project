@@ -14,7 +14,7 @@ using CSV
 using DataFrames
 using Dates
 
-include(joinpath(dirname(@__DIR__), "pfm-lib.jl"))
+include(joinpath("..", "pfm-lib.jl"))
 
 ## Constants
 const E = 210e3

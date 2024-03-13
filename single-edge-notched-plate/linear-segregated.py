@@ -5,6 +5,11 @@ import os
 from sfepy.mechanics import matcoefs, tensors
 
 
+def strain(displacement):
+    pass
+    # return problem.evaluate("ev_grad.i.Omega(u)", mode="qp")
+
+
 def stress(strain):
     return strain * matcoefs.stiffness_from_youngpoisson(
         dim=2, young=E, poisson=NU, plane="strain"
@@ -13,24 +18,28 @@ def stress(strain):
 
 def stress_mod(strain, strain_in, damage_in):
     if np.trace(strain_in) >= 0:
-        stress = (damage_in**2 + ETA) * stress(strain)
+        sigma = (damage_in**2 + ETA) * stress(
+            strain
+        )  # need to pass function to function
     else:
-        stress = tensors.get_deviator(
+        sigma = tensors.get_deviator(
             damage_in**2 + ETA
         ) + tensors.get_volumetric_tensor(stress(strain))
-    return stress
+    return sigma
 
 
-def positive_energy(strain):
-    if np.trace(strain) >= 0:
-        energy = 0.5 * (strain * stress(strain))
+def energy(displacement):
+    epsilon = strain(displacement)
+    if np.trace(epsilon) >= 0:
+        phi = 0.5 * (strain * stress(epsilon))
     else:
-        energy = (
+        phi = (
             0.5
-            * tensors.get_deviator(stress(strain))
-            * tensors.get_volumetric_tensor(strain)
+            * tensors.get_deviator(stress(epsilon))
+            * tensors.get_volumetric_tensor(epsilon)
         )
-    return energy
+    # return max(phi, phi_last)
+    return phi
 
 
 def step_hook(ts):
@@ -57,15 +66,12 @@ filename_mesh = os.path.join(
 save_directory = os.path.join("files-py-", os.path.splitext(__file__)[0])
 os.makedirs(save_directory, exist_ok=True)
 
-
 options = {
     "nls": "newton",
     "ls": "ls",
-    "step_hook": "step_hook",
+    # "step_hook": "step_hook",
     #'parametric_hook' : 'parametric_hook', # can be used to programatically change problem
-    "output_dir": os.path.join(
-        "files-py-", os.path.splitext(__file__)[0]
-    ),  # change this
+    "output_dir": save_directory,
 }
 
 regions = {
@@ -74,24 +80,9 @@ regions = {
     "Fixed": ("vertices in (y < -0.49)", "facet"),
 }
 
-materials = {
-    "solid": (
-        {
-            "D": matcoefs.stiffness_from_youngpoisson(
-                dim=2, young=E, poisson=NU, plane="strain"
-            )
-        }
-    ),
-}
-
 fields = {
-    "displacement": ("real", "vector", "Omega", ORDER, "H1"),
-    "damage": ("real", "scalar", "Omega", ORDER, "H1"),
-}
-
-integrals = {
-    "i": ORDER,
-    #'i': 2 * ORDER,
+    "displacement": ("real", 2, "Omega", ORDER, "H1"),
+    "damage": ("real", 1, "Omega", ORDER, "H1"),
 }
 
 variables = {
@@ -101,23 +92,49 @@ variables = {
         "unknown field",
         "damage",
         1,
-    ),  # remember previous damage - history function?
+    ),
     "v_phase": ("test field", "damage", "u_phase"),
-    "phi": ("parameter field", "energy", {"setter": "positive_energy"}),
+    "phi": ("parameter field", "displacement", {"setter": "energy"}),
 }
 
 functions = {
-    #'stress' : (lambda strain : strain * matcoefs.stiffness_from_youngpoisson(dim = 2, young = E, poisson = NU, plane = 'strain')),
-    "stress": (stress),
-    "stress_mod": (stress_mod),
-    "positive_energy": (positive_energy),
+    "strain": (strain,),
+    "stress": (stress,),
+    "stress_mod": (stress_mod,),
+    "energy": (energy,),
 }
 
-# These are both wrong
+ics = {
+    "phase": ("Omega", {"damage": 1.0}),
+    "disp": ("Omega", {"displacement": 0.0}),
+}
+
+ebcs = {
+    "fixed": ("Fixed", {"u.all": 0.0}),
+    "load": ("Load", {"u.1": 0.001}),  # maybe set as a function of time
+}
+
+# may not be necessary
+materials = {
+    "solid": (
+        {
+            "D": matcoefs.stiffness_from_youngpoisson(
+                dim=2, young=E, poisson=NU, plane="strain"
+            ),
+        },
+    ),
+}
+
 equations = {
-    "balance": """dw_lin_elastic(solid.D, v_disp, u_disp) = 0""",
-    #'damage' : """dw_dot.i.Omega(GC, LS, nabla(u_phase), nabla(v_phase)) + dw_dot.""",
-    "damage": """dw_laplace.i.Omega(np.dot(GC, LS), u_phase, v_phase) + """,
+    # "balance": """dw_integrate.i.Omega(ev_cauchy_strain.i.Omega(v_disp) * stress_mod(ev_cauchy_strain.i.Omega(u_disp), ev_cauchy_strain.i.Omega(displacement), damage)) = 0""",
+    "balance": """dw_lin_elastic.i.Omega(solid.D, v_disp, u_disp) = 0""",
+    # "damage": """dw_laplace.i.Omega(GC * LS, u_phase, v_phase) + dw_integrate.i.Omega(2 * s * v_phase * phi) + dw_integrate.i.Omega((GC * u_phase * v_phase)/LS) - dw_integrate.i.Omega((GC * v_phase)/LS) = 0""",
+    "damage": """dw_laplace.i.Omega(v_phase, u_phase) = 0""",
+}
+
+integrals = {
+    "i": ORDER,
+    #'i': 2 * ORDER,
 }
 
 solvers = {
@@ -142,11 +159,3 @@ solvers = {
         },
     ),
 }
-
-ebcs = {
-    "fixed": ("Fixed", {"u.all": 0.0}),
-    "load": ("Load", {"u.1": 0.001}),
-}
-
-# if __name__ == "__main__":
-#   main()

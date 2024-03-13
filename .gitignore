@@ -13,3 +13,6 @@ pyrightconfig.json
 
 # Ignore __pycache__
 */__*__
+
+# Ignore Julia test function
+test.jl

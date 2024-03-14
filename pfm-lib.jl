@@ -1,4 +1,4 @@
-function elas_fourth_order_const_tensor(E::Float64, ν::Float64, planar_state::String) # passed test
+function elas_fourth_order_const_tensor(E::Float64, ν::Float64, planar_state::String)
     if planar_state == "PlaneStress"
         C1111 = E / (1 - ν * ν)
         C1122 = (E * ν) / (1 - ν * ν)
@@ -192,34 +192,13 @@ function construct_disp(model, tags, masks)
 end
 
 function project(q, model, dΩ)
+    # This is inefficient and could be run once at the start
     reffe = ReferenceFE(lagrangian, Float64, order)
     V = FESpace(model, reffe, conformity = :L2)
     a(u, v) = ∫(u * v) * dΩ
     l(v) = ∫(v * q) * dΩ
     op = AffineFEOperator(a, l, V, V)
     solve(op)
-end
-
-function fetch_timer()
-    time_current = peektimer()
-    hours = floor(time_current / 3600)
-    minutes = floor((time_current - hours * 3600) / 60)
-    seconds = time_current - hours * 3600 - minutes * 60
-    @sprintf("%02d:%02d:%02d", hours, minutes, seconds)
-end
-
-function create_save_directory(filename::String)
-    date = Dates.format(Dates.now(), "yyyy-mm-dd_HH-MM")
-    save_directory = joinpath(splitext(filename)[1] * "-files", date)
-
-    if !isdir(save_directory)
-        mkpath(save_directory)
-    end
-
-    # Copy input file to save directory as .txt
-    cp(filename, joinpath(save_directory, (splitext(basename(filename))[1] * ".txt")), force = true) # force true to avoid parallel error
-
-    save_directory
 end
 
 function linear_segregated()
@@ -291,18 +270,14 @@ function linear_segregated()
         end
 
         if mod(count, 10) == 0 # write every nth iteration
-            writevtk(Ω, joinpath(save_directory, "partialSolve$count.vtu"),
-                cellfields = ["uh" => disp.uh, "s" => phase.sh,
-                "epsi" => ε(disp.uh), "sigma" => σ ∘ ε(disp.uh)])
+            write_solution(Ω, disp, phase, count)
         end
 
         v_app += δv
         count += 1
     end
 
-    writevtk(Ω, joinpath(save_directory, "fullSolve.vtu"),
-        cellfields=["uh" => disp.uh, "s" => phase.sh,
-        "epsi" => ε(disp.uh), "sigma" => σ ∘ ε(disp.uh)])
+    write_solution(Ω, disp, phase, count)
 end
 
 function linear_segregated_parallel(ranks)
@@ -382,18 +357,14 @@ function linear_segregated_parallel(ranks)
             end
 
             if mod(count, 10) == 0 # write every nth iteration
-                writevtk(Ω, joinpath(save_directory, "partialSolve$count.vtu"),
-                    cellfields = ["uh" => disp.uh, "s" => phase.sh,
-                    "epsi" => ε(disp.uh), "sigma" => σ ∘ ε(disp.uh)])
+                write_solution(Ω, disp, phase, count)
             end
 
             v_app += δv
             count += 1
         end
 
-        writevtk(Ω, joinpath(save_directory, "fullSolve.vtu"),
-            cellfields=["uh" => disp.uh, "s" => phase.sh,
-            "epsi" => ε(disp.uh), "sigma" => σ ∘ ε(disp.uh)])
+        write_solution(Ω, disp, phase, count)
     end
 end
 
@@ -427,6 +398,7 @@ function NL_coupled_recursive()
         for cycle ∈ 1:max_cycles
             phase.sh, pf_residual = step_phase_field(dΩ, phase, ψ_prev, tol, false)
             disp.uh, disp_residual = step_disp_field(dΩ, disp, phase, v_app, tol, false)
+
             @info "Cycle: $cycle" S_Residual = @sprintf("%.3e", pf_residual) V_Residual = @sprintf("%.3e", disp_residual)
 
             # Update energy state - max(previous energy, current energy)
@@ -451,9 +423,7 @@ function NL_coupled_recursive()
                 end
 
                 if mod(count, 10) == 0 # write every nth iteration
-                    writevtk(Ω, joinpath(save_directory, "partialSolve$count.vtu"),
-                        cellfields = ["uh" => disp.uh, "s" => phase.sh,
-                        "epsi" => ε(disp.uh), "sigma" => σ ∘ ε(disp.uh)])
+                    write_solution(Ω, disp, phase, count)
                 end
 
                 δv = increment(δv, v_app)
@@ -480,9 +450,88 @@ function NL_coupled_recursive()
         end
     end
 
-    writevtk(Ω, joinpath(save_directory, "fullSolve.vtu"),
-        cellfields=["uh" => disp.uh, "s" => phase.sh,
-        "epsi" => ε(disp.uh), "sigma" => σ ∘ ε(disp.uh)])
+    write_solution(Ω, disp, phase, count)
+end
+
+function NL_coupled_recursive_NCB()
+    # Initialise domain, spaces, measures and boundary conditions
+    model = GmshDiscreteModel(mesh_file)
+    Ω = Triangulation(model)
+    dΩ = Measure(Ω, degree)
+
+    phase = construct_phase(model)
+    disp = construct_disp(model, BCs.tags, BCs.masks)
+
+    Γ_load = BoundaryTriangulation(model, tags = "load")
+    dΓ_load = Measure(Γ_load, degree)
+    n_Γ_load = get_normal_vector(Γ_load)
+
+    # Initialise variables, arrays and cell states
+    count = 1
+    δv = δv_coarse
+    v_app = v_init
+    ψ_prev_stable = CellState(0.0, dΩ)
+
+    data_frame = DataFrame(Displacement = Float64[0.0], Increment = Float64[v_app],
+        Force = Float64[0.0], Energy = Float64[0.0], Damage = Float64[1.0])
+
+    # Main loop
+    while v_app < v_app_max
+        if v_app > v_app_threshold
+            δv = δv_refined
+        end
+
+        @info "** Step: $count **" Time = fetch_timer() Increment = @sprintf("%.3e mm", δv) Displacement = @sprintf("%.3e mm", v_app)
+        ψ_prev = ψ_prev_stable # reset energy state
+
+        for cycle ∈ 1:max_cycles
+            ψh_prev = project(ψ_prev, model, dΩ) # IMPORTANT - THIS IS NOT IN THE CUTBACK SCRIPT
+
+            phase.sh, pf_residual = step_phase_field(dΩ, phase, ψh_prev, tol, false)
+            disp.uh, disp_residual = step_disp_field(dΩ, disp, phase, v_app, tol, false)
+
+            @info "Cycle: $cycle" S_Residual = @sprintf("%.3e", pf_residual) V_Residual = @sprintf("%.3e", disp_residual)
+
+            # Update energy state - max(previous energy, current energy)
+            update_state!(new_energy_state, ψ_prev, ψ_pos ∘ ε(disp.uh))
+
+            # Check for convergence
+            if pf_residual < tol && disp_residual < tol
+                @info "** Step complete **"
+                @printf("\n------------------------------\n\n")
+
+                ψ_sum = sum(∫(ψ_pos ∘ ε(disp.uh)) * dΩ)
+                s_sum = sum(∫(phase.sh) * dΩ)
+                node_force = sum(∫(n_Γ_load ⋅ (σ_mod ∘ (ε(disp.uh), ε(disp.uh), phase.sh))) * dΓ_load)
+
+                push!(data_frame, (v_app, δv, node_force[2], ψ_sum, s_sum))
+                ψ_prev_stable = ψ_prev # saves energy state for the next step
+
+                try
+                    CSV.write(joinpath(save_directory, "log.csv"), data_frame)
+                catch
+                    @error "Error writing to CSV file"
+                end
+
+                if mod(count, 10) == 0 # write every nth iteration
+                    write_solution(Ω, disp, phase, count)
+                end
+
+                δv = increment(δv, v_app)
+                v_app += δv
+                count += 1
+                break
+            end
+
+            if cycle == max_cycles
+                @warn "** Step failed (continuing) **"
+                @printf("\n------------------------------\n\n")
+                ψ_prev_stable = ψ_prev # BANDAID FIX
+            end
+        end
+    end
+
+    write_solution(Ω, disp, phase, count)
 end
 
 function NL_coupled_multi_field()
@@ -502,12 +551,10 @@ function NL_coupled_multi_field()
     count = 1
     δv = δv_max
     v_app = v_init
-    load = Float64[];               push!(load, 0.0)
-    displacement = Float64[];       push!(displacement, 0.0)
-    increments = Float64[];         push!(increments, v_init)
-    energy= Float64[];              push!(energy, sum(∫(ψ_pos ∘ ε(disp.uh)) * dΩ))
-    damage = Float64[];             push!(damage, sum(∫(phase.sh) * dΩ))
     ψ_prev = CellState(0.0, dΩ)
+
+    data_frame = DataFrame(Displacement = Float64[0.0], Increment = Float64[v_app],
+        Force = Float64[0.0], Energy = Float64[0.0], Damage = Float64[1.0])
 
     # Main loop
     while v_app < v_app_max
@@ -530,14 +577,7 @@ function NL_coupled_multi_field()
             s_sum = sum(∫(phase.sh) * dΩ)
             node_force = sum(∫(n_Γ_load ⋅ (σ_mod ∘ (ε(disp.uh), ε(disp.uh), phase.sh))) * dΓ_load) # you can directly use sum()[1]
 
-            push!(energy, ψ_sum)
-            push!(damage, s_sum)
-            push!(load, node_force[2])
-            push!(displacement, v_app)
-            push!(increments, δv)
-
-            data_frame = DataFrame(Displacement = displacement, Increment = increments,
-                Force = load, Energy = energy, Damage = damage)
+            push!(data_frame, (v_app, δv, node_force[2], ψ_sum, s_sum))
 
             try
                 CSV.write(joinpath(save_directory, "log.csv"), data_frame)
@@ -546,9 +586,7 @@ function NL_coupled_multi_field()
             end
 
             if mod(count, 10) == 0 # write every nth iteration
-                writevtk(Ω, joinpath(save_directory, "partialSolve$count.vtu"),
-                    cellfields = ["uh" => disp.uh, "s" => phase.sh,
-                    "epsi" => ε(disp.uh), "sigma" => σ ∘ ε(disp.uh)])
+                write_solution(Ω, disp, phase, count)
             end
             
             δv = min(δv * growth_rate, δv_max) # increase increment
@@ -563,9 +601,7 @@ function NL_coupled_multi_field()
         end
     end
 
-    writevtk(Ω, joinpath(save_directory, "fullSolve.vtu"),
-        cellfields=["uh" => disp.uh, "s" => phase.sh,
-        "epsi" => ε(disp.uh), "sigma" => σ ∘ ε(disp.uh)])
+    write_solution(Ω, disp, phase, count)
 end
 
 function NL_coupled_multi_field_parallel(ranks)
@@ -587,12 +623,10 @@ function NL_coupled_multi_field_parallel(ranks)
         count = 1
         δv = δv_max
         v_app = v_init
-        load = Float64[];               push!(load, 0.0)
-        displacement = Float64[];       push!(displacement, 0.0)
-        increments = Float64[];         push!(increments, v_init)
-        energy= Float64[];              push!(energy, sum(∫(ψ_pos ∘ ε(disp.uh)) * dΩ))
-        damage = Float64[];             push!(damage, sum(∫(phase.sh) * dΩ))
         ψ_prev = CellState(0.0, dΩ)
+
+        data_frame = DataFrame(Displacement = Float64[0.0], Increment = Float64[v_app],
+        Force = Float64[0.0], Energy = Float64[0.0], Damage = Float64[1.0])
 
         # Main loop
         while v_app < v_app_max
@@ -615,14 +649,7 @@ function NL_coupled_multi_field_parallel(ranks)
                 s_sum = sum(∫(phase.sh) * dΩ)
                 node_force = sum(∫(n_Γ_load ⋅ (σ_mod ∘ (ε(disp.uh), ε(disp.uh), phase.sh))) * dΓ_load) # you can directly use sum()[1]
 
-                push!(energy, ψ_sum)
-                push!(damage, s_sum)
-                push!(load, node_force[2])
-                push!(displacement, v_app)
-                push!(increments, δv)
-
-                data_frame = DataFrame(Displacement = displacement, Increment = increments,
-                    Force = load, Energy = energy, Damage = damage)
+                push!(data_frame, (v_app, δv, node_force[2], ψ_sum, s_sum))
 
                 try
                     CSV.write(joinpath(save_directory, "log.csv"), data_frame)
@@ -631,9 +658,7 @@ function NL_coupled_multi_field_parallel(ranks)
                 end
 
                 if mod(count, 10) == 0 # write every nth iteration
-                    writevtk(Ω, joinpath(save_directory, "partialSolve$count.vtu"),
-                        cellfields = ["uh" => disp.uh, "s" => phase.sh,
-                        "epsi" => ε(disp.uh), "sigma" => σ ∘ ε(disp.uh)])
+                    write_solution(Ω, disp, phase, count)
                 end
                 
                 δv = min(δv * growth_rate, δv_max) # increase increment
@@ -648,13 +673,11 @@ function NL_coupled_multi_field_parallel(ranks)
             end
         end
 
-        writevtk(Ω, joinpath(save_directory, "fullSolve.vtu"),
-            cellfields=["uh" => disp.uh, "s" => phase.sh,
-            "epsi" => ε(disp.uh), "sigma" => σ ∘ ε(disp.uh)])
+        write_solution(Ω, disp, phase, count)
     end
 end
 
-function NL_coupled_multi_field_MOD()
+function NL_coupled_multi_field_NCB()
     # Initialise domain, spaces, measures and boundary conditions
     model = GmshDiscreteModel(mesh_file)
     Ω = Triangulation(model)
@@ -669,74 +692,81 @@ function NL_coupled_multi_field_MOD()
 
     # Initialise variables, arrays and cell states
     count = 1
-    δv = δv_max
+    δv = δv_coarse
     v_app = v_init
-    load = Float64[];           push!(load, 0.0)
-    displacement = Float64[];   push!(displacement, 0.0)
-    increments = Float64[];     push!(increments, v_init)
-    energy= Float64[];          push!(energy, sum(∫(ψ_pos ∘ ε(disp.uh)) * dΩ))
-    damage = Float64[];         push!(damage, sum(∫(phase.sh) * dΩ))
     ψ_prev = CellState(0.0, dΩ)
+
+    data_frame = DataFrame(Displacement = Float64[0.0], Increment = Float64[v_app],
+        Force = Float64[0.0], Energy = Float64[0.0], Damage = Float64[1.0])
 
     # Main loop
     while v_app < v_app_max
-        if δv < δv_min
-            δv = δv_min
-            @error "** δv < δv_min - solution failed (ish)**"
-            @printf("\n------------------------------\n\n")
-            #break
-        end
-
-        if v_app > 5e-3
-            δv = min(δv, 1e-5) # set the maximum increment to 1e-5 like Rahaman
+        if v_app > v_app_threshold
+            δv = δv_refined
         end
 
         @info "** Step: $count **" Time = fetch_timer() Increment = @sprintf("%.3e mm", δv) Displacement = @sprintf("%.3e mm", v_app)
-        phase.sh, disp.uh, coupled_residual = step_coupled_fields(dΩ, phase, disp, ψ_prev, v_app, tol, true)
+        phase.sh, disp.uh, = step_coupled_fields(dΩ, phase, disp, ψ_prev, v_app, tol, true)
 
-        if coupled_residual < tol
-            @info "** Step complete **"
-            @printf("\n------------------------------\n\n")
+        @info "** Step complete **"
+        @printf("\n------------------------------\n\n")
 
-            # Update energy state - max(previous energy, current energy)
-            update_state!(new_energy_state, ψ_prev, ψ_pos ∘ ε(disp.uh))
+        update_state!(new_energy_state, ψ_prev, ψ_pos ∘ ε(disp.uh))
 
-            ψ_sum = sum(∫(ψ_pos ∘ ε(disp.uh)) * dΩ);    push!(energy, ψ_sum)
-            s_sum = sum(∫(phase.sh) * dΩ);              push!(damage, s_sum)
-            push!(increments, δv)
+        ψ_sum = sum(∫(ψ_pos ∘ ε(disp.uh)) * dΩ)
+        s_sum = sum(∫(phase.sh) * dΩ)
+        node_force = sum(∫(n_Γ_load ⋅ (σ_mod ∘ (ε(disp.uh), ε(disp.uh), phase.sh))) * dΓ_load) # you can directly use sum()[1]
 
-            node_force = sum(∫(n_Γ_load ⋅ (σ_mod ∘ (ε(disp.uh), ε(disp.uh), phase.sh))) * dΓ_load)
-            push!(load, node_force[2]); push!(displacement, v_app)
+        push!(data_frame, (v_app, δv, node_force[2], ψ_sum, s_sum))
 
-            data_frame = DataFrame(Displacement = displacement, Increment = increments,
-                Force = load, Energy = energy, Damage = damage)
-
-            try
-                CSV.write(joinpath(save_directory, "log.csv"), data_frame)
-            catch
-                @error "Error writing to CSV file"
-            end
-
-            if mod(count, 10) == 0 # write every nth iteration
-                writevtk(Ω, joinpath(save_directory, "partialSolve$count.vtu"),
-                    cellfields = ["uh" => disp.uh, "s" => phase.sh,
-                    "epsi" => ε(disp.uh), "sigma" => σ ∘ ε(disp.uh)])
-            end
-            
-            δv = min(δv * growth_rate, δv_max) # increase increment
-            v_app += δv # add increment
-            count += 1 # update count
-        else
-            @warn "** Step failed **"
-            @printf("\n------------------------------\n\n")
-            
-            v_app -= δv # remove full increment
-            δv = δv / 2 # halve increment
+        try
+            CSV.write(joinpath(save_directory, "log.csv"), data_frame)
+        catch
+            @error "Error writing to CSV file"
         end
+
+        if mod(count, 10) == 0 # write every nth iteration
+            write_solution(Ω, disp, phase, count)
+        end
+
+        v_app += δv # add increment
+        count += 1 # update count
     end
 
-    writevtk(Ω, joinpath(save_directory, "fullSolve.vtu"),
-        cellfields=["uh" => disp.uh, "s" => phase.sh,
+    write_solution(Ω, disp, phase, count)
+end
+
+function fetch_timer()
+    time_current = peektimer()
+    hours = floor(time_current / 3600)
+    minutes = floor((time_current - hours * 3600) / 60)
+    seconds = time_current - hours * 3600 - minutes * 60
+    @sprintf("%02d:%02d:%02d", hours, minutes, seconds)
+end
+
+function create_save_directory(filename::String)
+    date_time = Dates.format(now(), "yyyy-mm-dd_HH-MM-SS")
+    save_directory = joinpath(dirname(filename),
+        "files",
+        splitext(basename(filename))[1] * "-jl",
+        date_time)
+
+    if !isdir(save_directory)
+        mkpath(save_directory)
+    end
+
+    # Copy input file to save directory as .txt
+    cp(filename,
+        joinpath(save_directory,
+        (splitext(basename(filename))[1] * ".txt")),
+        force = true) # force true to avoid parallel error
+
+    save_directory
+end
+
+function write_solution(Ω, disp, phase, count)
+    writevtk(Ω, joinpath(save_directory, "solution-iter-$count.vtu"),
+        cellfields = ["uh" => disp.uh, "s" => phase.sh,
         "epsi" => ε(disp.uh), "sigma" => σ ∘ ε(disp.uh)])
 end
 

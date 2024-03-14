@@ -30,9 +30,10 @@ const tol = 1e-6
 const δv_min = 1e-7 # 1e-7
 const δv_max = 1e-4 # 1e-5
 const v_init = 2.5e-3
-const v_app_max = 8e-3
+const v_app_max = 7e-3
 
 ## Displacement Adaptive Stepping
+const δv_coarse = 1e-4
 const δv_refined = 1e-5
 const v_app_threshold = 5e-3
 
@@ -45,7 +46,7 @@ const degree = 2 * order
 
 ## Run
 tick()
-NL_coupled_recursive()
+NL_coupled_recursive_NCB()
 tock()
 
 ## Plot

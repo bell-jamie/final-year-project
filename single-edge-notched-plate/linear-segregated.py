@@ -1,8 +1,9 @@
 from __future__ import absolute_import
+from datetime import datetime
+from sfepy.mechanics import matcoefs, tensors
+
 import numpy as np
 import os
-
-from sfepy.mechanics import matcoefs, tensors
 
 
 def strain(displacement):
@@ -60,10 +61,16 @@ ETA = 1e-15
 ORDER = 2
 DEGREE = 2 * ORDER
 
-filename_mesh = os.path.join(
-    os.path.dirname(__file__), "meshes", "notchedPlateTriangular.vtk"
+current_datetime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+script_directory = os.path.dirname(__file__)
+filename_mesh = os.path.join(script_directory, "meshes", "notchedPlateTriangular.vtk")
+save_directory = os.path.join(
+    script_directory,
+    "files",
+    os.path.splitext(os.path.basename(__file__))[0] + "-py",
+    current_datetime,
 )
-save_directory = os.path.join("files-py-", os.path.splitext(__file__)[0])
+
 os.makedirs(save_directory, exist_ok=True)
 
 options = {
@@ -121,6 +128,8 @@ materials = {
             "D": matcoefs.stiffness_from_youngpoisson(
                 dim=2, young=E, poisson=NU, plane="strain"
             ),
+            "GCLS": GC * LS,
+            "GC/LS": GC / LS,
         },
     ),
 }
@@ -128,8 +137,8 @@ materials = {
 equations = {
     # "balance": """dw_integrate.i.Omega(ev_cauchy_strain.i.Omega(v_disp) * stress_mod(ev_cauchy_strain.i.Omega(u_disp), ev_cauchy_strain.i.Omega(displacement), damage)) = 0""",
     "balance": """dw_lin_elastic.i.Omega(solid.D, v_disp, u_disp) = 0""",
-    # "damage": """dw_laplace.i.Omega(GC * LS, u_phase, v_phase) + dw_integrate.i.Omega(2 * s * v_phase * phi) + dw_integrate.i.Omega((GC * u_phase * v_phase)/LS) - dw_integrate.i.Omega((GC * v_phase)/LS) = 0""",
-    "damage": """dw_laplace.i.Omega(v_phase, u_phase) = 0""",
+    # "damage": """dw_laplace.i.Omega(GC * LS, u_phase, v_phase) + dw_integrate.i.Omega(2 * v_phase * u_phase * phi) + dw_integrate.i.Omega((GC * u_phase * v_phase)/LS) - dw_integrate.i.Omega((GC * v_phase)/LS) = 0""",
+    "damage": """dw_laplace.i.Omega(solid.GCLS, v_phase, u_phase) + dw_integrate.i.Omega(2 * v_phase * u_phase * phi) = 0""",
 }
 
 integrals = {

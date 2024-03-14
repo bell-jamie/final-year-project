@@ -1,6 +1,5 @@
 # Ignore save directories
-*/*-files/
-*/files-*/
+*/files/
 
 # Ignore .DS_Store
 .DS_Store
@@ -16,3 +15,7 @@ pyrightconfig.json
 
 # Ignore Julia test function
 test.jl
+
+# Ignore mesh files
+.vtk
+.msh

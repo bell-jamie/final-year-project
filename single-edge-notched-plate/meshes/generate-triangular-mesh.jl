@@ -37,9 +37,9 @@ gmsh.model.geo.addLine(8, 1, 8)
 gmsh.model.geo.addCurveLoop([1, 2, 3, 4, 5, 6, 7, 8], 1)
 gmsh.model.geo.addPlaneSurface([1], 1)
 
-gmsh.model.geo.addPhysicalGroup(0, [1, 2], 1, "load") # add top points to physical group
+#gmsh.model.geo.addPhysicalGroup(0, [1, 2], 1, "load") # add top points to physical group
 gmsh.model.geo.addPhysicalGroup(1, [1], 1, "load") # add top line to physical group
-gmsh.model.geo.addPhysicalGroup(0, [3, 4], 2, "fixed") # add bottom points to physical group
+#gmsh.model.geo.addPhysicalGroup(0, [3, 4], 2, "fixed") # add bottom points to physical group
 gmsh.model.geo.addPhysicalGroup(1, [3], 2, "fixed") # add bottom line to physical group
 gmsh.model.geo.addPhysicalGroup(2, [1], 1, "domain")
 

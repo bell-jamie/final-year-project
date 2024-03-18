@@ -21,4 +21,4 @@ test.jl
 *.msh
 
 # Ignore wip folder
-*/wip/
+/wip/

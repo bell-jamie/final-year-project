@@ -17,5 +17,8 @@ pyrightconfig.json
 test.jl
 
 # Ignore mesh files
-.vtk
-.msh
+*.vtk
+*.msh
+
+# Ignore wip folder
+*/wip/

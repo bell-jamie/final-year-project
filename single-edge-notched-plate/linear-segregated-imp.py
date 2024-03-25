@@ -80,18 +80,18 @@ def main():
     int = Integral("i", order=DEGREE)
 
     s1 = Term.new("dw_laplace(m.GCLS, v, u)", int, omega, m=m, v=v_phase, u=u_phase)
-    # s2 = Term.new()
+    s2 = Term.new("dw_dot(v, u)", int, omega, v=v_phase, u=u_phase)
     s3 = Term.new("dw_dot(m.GC_LS, v, u)", int, omega, m=m, v=v_phase, u=u_phase)
     s4 = Term.new("ev_integrate(m.GC_LS, u)", int, omega, m=m, u=u_phase)
-    eq_phase = Equation("eq_phase", s1 + s3 - s4)  # add s2
+    eq_phase = Equation("eq_phase", s1 + 2 * s2 + s3 - s4)
 
     u1 = Term.new("dw_lin_elastic(m.C, v, u)", int, omega, m=m, v=v_disp, u=u_disp)
     eq_disp = Equation("eq_disp", u1)
 
-    eqs = Equations([eq_phase, eq_disp])
+    eqs = Equations([eq_disp, eq_phase])
 
     fixed = EssentialBC("fixed", fixed, {"u_disp.all": 0.0})
-    load = EssentialBC("load", load, {"u_disp.0": 0.001})
+    load = EssentialBC("load", load, {"u_disp.0": 0.0001})
 
     ls = ScipyDirect({})
     nls_status = IndexedStruct()

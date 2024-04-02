@@ -4,6 +4,8 @@ from sfepy.mechanics import matcoefs, tensors
 
 # from sfepy.discrete import Problem
 from sfepy.discrete.fem import Mesh
+from sfepy.discrete.conditions import EssentialBC, Conditions
+from sfepy.discrete import Problem
 
 import numpy as np
 import os
@@ -22,6 +24,12 @@ def stress(strain):
             dim=2, young=E, poisson=NU, plane="strain"
         ),
         strain,
+    )
+
+
+def c_mod():
+    return matcoefs.stiffness_from_youngpoisson(
+        dim=2, young=E, poisson=NU, plane="strain"
     )
 
 
@@ -57,56 +65,65 @@ def stress_mod(strain, strain_in, damage_in):
     # Remember (%s) * dw_term()""" % phi_matrix,
 
 
-def energy(pb, init=True):
-    if init:
-        # create phi
-        pass
-    else:
-        # Evaluate the average strain in each element
-        strain = pb.evaluate("ev_cauchy_strain.i.Omega(u_disp)", mode="el_avg")
+def load(ts, coors, **kwargs):
+    print(ts.time)
+    return 0.001 * ts.time
 
-        # Number of elements
-        n_e = pb.domain.mesh.n_el
 
-        phi_old = phi_new = variables["phi"]
+def get_energy(coors, region=None, variable=None, **kwargs):
+    """
+    Initialise the energy field.
+    """
+    print("Initialising energy field.")
+    return np.zeros(
+        int(
+            # options["n_elements"],
+            coors.shape[0],
+        ),
+        dtype=np.float64,
+    )
 
-        for i in range(n_e):
-            # strain[i][0] is the strain array for the ith element
-            strain_local = strain[i][0]
 
-            # Trace: [xx] + [xy]
-            trace = strain_local[0] + strain_local[1]
-            # trace = tensors.get_trace(np.transpose(strain_local))
+def update_energy(pb, strain, stress):
+    # Get the current energy field
+    phi = pb.get_variables()["phi"].data[0]
+    print(phi)
 
-            # 0.5 * (ε ⊙ σ(ε))
-            tensile_energy = 0.5 * np.tensordot(strain_local, stress(strain_local))
+    for i in range(pb.domain.mesh.n_el):
+        # Calculate trace ([xx] + [yy])
+        trace = strain[i][0][0] + strain[i][0][1]
 
-            # 0.5 * (I4_dev ⊙ σ(ε) ⊙ (I4_dev ⊙ ε))
-            compressive_energy = 0.5 * np.tensordot(
-                tensors.get_deviator(stress(strain_local)),
-                tensors.get_deviator(strain_local),
-            )
+        # Calculate the energy in the element
+        full_energy = 0.5 * np.tensordot(strain[i][0], stress[i][0])
+        decomp_energy = 0.5 * np.tensordot(
+            tensors.get_deviator(stress[i][0]),
+            tensors.get_deviator(strain[i][0]),
+        )
 
-            # max(ψ_prev, ψ_current)
-            phi_new[i] = max(
-                phi_old[i],
-                (tensile_energy if trace >= 0 else compressive_energy),
-            )
+        # Update the energy field
+        if trace >= 0.0:
+            phi[i] = max(phi[i], full_energy)
+        else:
+            phi[i] = max(phi[i], decomp_energy)
 
-        return phi_new
-
-    # phi = np.ones((variables["u_phase"].field.n_nod,), dtype=np.float64)
-    # phi = np.zeros((pb.domain.mesh.n_el,), dtype=np.float64)
-    # variables.set_state_parts({"phi": phi})
+    return phi
 
 
 def pre_process(pb):
     number_elements = pb.domain.mesh.n_el
+    number_nodes = pb.domain.mesh.n_nod
+    options.update({"n_elements": number_elements, "n_nodes": number_nodes})
     print("The number of elements in the mesh is " + str(number_elements))
+    print("The number of nodes in the mesh is " + str(number_nodes))
 
 
 def step_hook(pb, ts, variables):
-    phi = energy(pb, False)
+    print(pb.ebcs[1].dofs)
+    pb.ebcs[1].dofs["u_disp.1"] = -ts.time
+    strain_cur = pb.evaluate("ev_cauchy_strain.i.Omega(u_disp)", mode="el_avg")
+    stress_cur = pb.evaluate("ev_cauchy_stress.i.Omega(m.C, u_disp)", mode="el_avg")
+    damage_cur = pb.evaluate("ev_integrate.i.Omega(u_phase)", mode="el_avg")
+    pb.get_variables()["phi"].data[0] = update_energy(pb, strain_cur, stress_cur)
 
 
 def post_process(out, pb, state, extend=False):
@@ -118,14 +135,18 @@ def post_process(out, pb, state, extend=False):
 
     ev = pb.evaluate
     stress = ev("ev_cauchy_stress.i.Omega(m.C, u_disp)", mode="el_avg")
+    energy = ev("ev_integrate.i.Omega(phi)", mode="el_avg")
 
     vms = get_von_mises_stress(stress.squeeze())
     vms.shape = (vms.shape[0], 1, 1, 1)
     out["von_mises_stress"] = Struct(
         name="output_data", mode="cell", data=vms, dofs=None
     )
+    out["elastic_energy"] = Struct(
+        name="output_data", mode="cell", data=energy, dofs=None
+    )
 
-    pb.save_state(os.path.join(pb.output_dir, "test.vtk"), out=out)
+    # pb.save_state(os.path.join(pb.output_dir, "test.vtk"), out=out)
 
     return out  # needed?
 
@@ -193,16 +214,24 @@ variables = {
         1,
     ),
     "v_phase": ("test field", "damage", "u_phase"),
-    "phi": ("parameter field", "displacement", {"setter": "energy"}),
+    "phi": (
+        "parameter field",
+        "damage",
+        {"ic": "get_energy"},
+        1,
+    ),
 }
 
 # may not be necessary
+# material-nonlinearity.py shows that the material can be defined using a function directly
+# In that example the mu value is strain dependant, however I can't tell whether it's anisotropic
 materials = {
     "m": (
         {
             "C": matcoefs.stiffness_from_youngpoisson(
                 dim=2, young=E, poisson=NU, plane="strain"
             ),
+            "C_mod": c_mod(),
             "GCLS": GC * LS,
             "GC_LS": GC / LS,
         },
@@ -215,29 +244,31 @@ integrals = {
 }
 
 # sfepy/examples/acoustics/acoustics3d.py - has some interesting equation syntax
-# should we solve damage first? - jamie for tomorrow you were about to try and make the phi energy function work with a step hook...
 equations = {
-    "eq_disp": """dw_lin_elastic.i.Omega(m.C, v_disp, u_disp) = 0""",
+    "eq_disp": """dw_lin_elastic.i.Omega(m.C_mod, v_disp, u_disp) = 0""",
     # "eq_phase": """dw_laplace.i.Omega(m.GCLS, v_phase, u_phase) + 2 * phi * dw_dot.i.Omega(v_phase, u_phase) + dw_dot.i.Omega(m.GC_LS, v_phase, u_phase) = dw_integrate.i.Omega(m.GC_LS, v_phase)""",
-    "eq_phase": """dw_laplace.i.Omega(m.GCLS, v_phase, u_phase) + dw_dot.i.Omega(m.GC_LS, v_phase, u_phase) = dw_integrate.i.Omega(m.GC_LS, v_phase)""",
+    # Currently running with no damage irreversibilty
+    # Wierd 3rd term just to include phi for testing
+    "eq_phase": """dw_laplace.i.Omega(m.GCLS, v_phase, u_phase) + 2 * dw_dot.i.Omega(v_phase, u_phase) + 2 * dw_dot.i.Omega(v_phase, phi) + dw_dot.i.Omega(m.GC_LS, v_phase, u_phase) = dw_integrate.i.Omega(m.GC_LS, v_phase)""",
 }
 
 functions = {
-    "strain": (strain,),
-    "stress": (stress,),
-    "stress_mod": (stress_mod,),
-    "init_phi": (init_phi,),
-    "energy": (energy,),
+    "get_energy": (get_energy,),
+    "load": (load,),
 }
 
 ics = {
     "phase": ("Omega", {"damage": 1.0}),
     "disp": ("Omega", {"displacement": 0.0}),
+    # "energy": ("Omega", {"phi": 0.0}),
 }
 
 ebcs = {
     "fixed": ("Fixed", {"u_disp.all": 0.0}),
-    "load": ("Load", {"u_disp.1": 1.0}),  # maybe set as a function of time
+    "load": (
+        "Load",
+        {"u_disp.0": 0.0, "u_disp.1": 0.0},
+    ),  # maybe set as a function of time
 }
 
 solvers = {
@@ -254,9 +285,9 @@ solvers = {
         {
             "t0": T0,
             "t1": T1,
-            "dt": 0.01,  # need to make this dynamic...
-            #'dt'     : None,
-            #'n_step' : 5,
+            # "dt": 0.01,  # need to make this dynamic...
+            "dt": None,
+            "n_step": 50,
             "quasistatic": True,
             "verbose": 1,
         },

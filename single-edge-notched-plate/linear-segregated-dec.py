@@ -2,6 +2,9 @@ from __future__ import absolute_import
 from datetime import datetime
 from sfepy.mechanics import matcoefs, tensors
 
+# from sfepy.discrete import Problem
+from sfepy.discrete.fem import Mesh
+
 import numpy as np
 import os
 
@@ -13,16 +16,18 @@ def strain(pb, displacement):
 
 
 def stress(strain):
-    return strain * matcoefs.stiffness_from_youngpoisson(
-        dim=2, young=E, poisson=NU, plane="strain"
+    # for hadamard product use np.multiply
+    return np.dot(
+        matcoefs.stiffness_from_youngpoisson(
+            dim=2, young=E, poisson=NU, plane="strain"
+        ),
+        strain,
     )
 
 
 def stress_mod(strain, strain_in, damage_in):
     if np.trace(strain_in) >= 0:
-        sigma = (damage_in**2 + ETA) * stress(
-            strain
-        )  # need to pass function to function
+        sigma = (damage_in**2 + ETA) * stress(strain)
     else:
         sigma = tensors.get_deviator(
             damage_in**2 + ETA
@@ -35,100 +40,73 @@ def stress_mod(strain, strain_in, damage_in):
     # The filter gets calculated in the step function and then passed to the stress_mod function
     # This way the only unknown is u_disp and calculations can be faster
     # Try and write this out by hand to validate the idea
+    #
+    # Also think about where these filters are stored and how they get passed to this function
 
     return sigma
 
-
-def energy(displacement):
-    epsilon = strain(displacement)
-    if np.trace(epsilon) >= 0:
-        phi = 0.5 * (strain * stress(epsilon))
-    else:
-        phi = (
-            0.5
-            * tensors.get_deviator(stress(epsilon))
-            * tensors.get_volumetric_tensor(epsilon)
-        )
     # return max(phi, phi_last)
-    return phi
+    #
+    #
+    # I know the dimensions of the mesh, so actually phi doesn't have to be a field at all...
+    # It can just be a matrix that's managed independantly of the state variables
+    # It can be initialised pre loop and then updated in the step function
+    #
+    # Actuallyyyyyyy that might be hard because how do you know which element is which?
+    # This will only work if the equation allows matrix multiplication
+    # Remember (%s) * dw_term()""" % phi_matrix,
 
 
-def init_phi(variables):
-    phi = np.ones((variables["u_phase"].field.n_nod,), dtype=np.float64)
-    variables.set_state_parts({"phi": phi})
+def energy(pb, init=True):
+    if init:
+        # create phi
+        pass
+    else:
+        # Evaluate the average strain in each element
+        strain = pb.evaluate("ev_cauchy_strain.i.Omega(u_disp)", mode="el_avg")
+
+        # Number of elements
+        n_e = pb.domain.mesh.n_el
+
+        phi_old = phi_new = variables["phi"]
+
+        for i in range(n_e):
+            # strain[i][0] is the strain array for the ith element
+            strain_local = strain[i][0]
+
+            # Trace: [xx] + [xy]
+            trace = strain_local[0] + strain_local[1]
+            # trace = tensors.get_trace(np.transpose(strain_local))
+
+            # 0.5 * (ε ⊙ σ(ε))
+            tensile_energy = 0.5 * np.tensordot(strain_local, stress(strain_local))
+
+            # 0.5 * (I4_dev ⊙ σ(ε) ⊙ (I4_dev ⊙ ε))
+            compressive_energy = 0.5 * np.tensordot(
+                tensors.get_deviator(stress(strain_local)),
+                tensors.get_deviator(strain_local),
+            )
+
+            # max(ψ_prev, ψ_current)
+            phi_new[i] = max(
+                phi_old[i],
+                (tensile_energy if trace >= 0 else compressive_energy),
+            )
+
+        return phi_new
+
+    # phi = np.ones((variables["u_phase"].field.n_nod,), dtype=np.float64)
+    # phi = np.zeros((pb.domain.mesh.n_el,), dtype=np.float64)
+    # variables.set_state_parts({"phi": phi})
+
+
+def pre_process(pb):
+    number_elements = pb.domain.mesh.n_el
+    print("The number of elements in the mesh is " + str(number_elements))
 
 
 def step_hook(pb, ts, variables):
-    # u_disp = variables["displacement"]
-    strain = pb.evaluate("ev_cauchy_strain.i.Omega(u_disp)", mode="qp")
-
-    print(strain)
-    print(strain.shape)
-
-    # Strain is formatted as [xx, yy, 2xy] to exploit symmetry of [[xx, xy], [yx, yy]]
-    # By default all the tensors use the symmetric tensor format
-    # By including a flag this can be changed: tensors.get_volumetric_tensor(epsilon, symmetric=False)]
-
-    """
-
-    phi = np.zeros(strain.shape[0])  # phi value for each element
-
-    strain_2D = np.zeros((strain.shape[0], 2, 2))
-
-    for i in range(strain_2D.shape[0]):
-        strain_2D[i, 0, 0] = strain[i, 0]
-        strain_2D[i, 1, 1] = strain[i, 1]
-        strain_2D[i, 0, 1] = strain[i, 2] / 2
-        strain_2D[i, 1, 0] = strain[i, 2] / 2
-
-    for i in range(phi.shape[0]):
-        phi[i] = (
-            0.5 * (strain_2D[i] * stress(strain_2D[i]))
-            if np.trace(strain_2D[i]) >= 0
-            else 0.5
-            * (
-                tensors.get_deviator(stress(strain_2D[i]))
-                * tensors.get_deviator(strain_2D[i])
-            )
-        )
-
-    for i in range(strain.shape[0]):
-        for j in range(strain.shape[1]):
-            # Psuedo-trace(strain) as strain is only given as xx, yy, zz
-            vector_sum = np.sum(strain[i, j, :, :])
-
-            phi[i, j] = (
-                0.5 * (strain * stress(strain))
-                if vector_sum >= 0
-                else 0.5
-                * (tensors.get_deviator(stress(strain)) * tensors.get_deviator(strain))
-            )
-    """
-
-    elems = strain.shape[0]
-    phi = np.zeros(elems)
-    # If phi is not in variables, set phi_old to phi
-    phi_old = variables["phi"] if "phi" in variables else phi
-
-    for i in range(elems):
-        strain_local = strain[i][0]
-        print(strain_local)
-        phi[i] = max(
-            (
-                0.5 * (strain_local * stress(strain_local))
-                if tensors.get_trace(strain_local).all() >= 0
-                else 0.5
-                * (
-                    tensors.get_deviator(stress(strain_local))
-                    * tensors.get_deviator(strain_local)
-                )
-            ),
-            phi_old[i],
-        )
-
-    variables["phi"] = phi
-
-    # variables["phi"] = max(variables["phi"], phi_new)
+    phi = energy(pb, False)
 
 
 def post_process(out, pb, state, extend=False):
@@ -191,6 +169,7 @@ options = {
     "step_hook": "step_hook",
     #'parametric_hook' : 'parametric_hook', # can be used to programatically change problem
     "output_dir": save_directory,  # this might not work the way I thought it does
+    "pre_process_hook": "pre_process",
     "post_process_hook": "post_process",
 }
 
@@ -214,7 +193,7 @@ variables = {
         1,
     ),
     "v_phase": ("test field", "damage", "u_phase"),
-    "phi": ("parameter field", "displacement", {"setter": "init_phi"}),
+    "phi": ("parameter field", "displacement", {"setter": "energy"}),
 }
 
 # may not be necessary

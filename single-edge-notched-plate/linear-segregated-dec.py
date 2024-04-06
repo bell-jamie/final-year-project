@@ -10,64 +10,61 @@ from sfepy.discrete import Problem
 import numpy as np
 import os
 
+# I have an idea that I can generate filter matrices eg... [[0, 1, 0], [1, 1, 1], [0, 1, 0]
+# tensile filter = generate_filter_matrix(), compressive filter = ones() - tensile filter (inverted)
+# Then multiply ((damage^2 + eta) * stress tensor) and ((damage^2 + eta) * stress_dev + stress_vol) by filter matrix
+# Maybe just one filter... and then tensile = filter, compression = filter.T
+# The filter gets calculated in the step function and then passed to the stress_mod function
+# This way the only unknown is u_disp and calculations can be faster
+# Try and write this out by hand to validate the idea
+# Also think about where these filters are stored and how they get passed to this function
 
-def strain(pb, displacement):
-    # return pb.evaluate("ev_cauchy_strain.i.Omega(u)", mode="el_avg")
-    pass
-    # return problem.evaluate("ev_grad.i.Omega(u)", mode="qp")
+
+# Right now I think that the material properties only vary over the element's quadrature points
+# Additionally, the material properties are being calculated before the damage equation, therefore will be out of date by the time the displacement equation is solved
+# This probably depends on whether my assumption of sequential solving is correct
+# Reversing the field priority order will mean that the elastic strain energy will be out of date by the time damage is solved
+#
+# Eval equations function in Problem class might be a way to solve damage before calculating c_mod
+# Orr there is the update materials function which could somehow be called after the damage equation is solved
 
 
-def stress(strain):
-    # for hadamard product use np.multiply
-    return np.dot(
-        matcoefs.stiffness_from_youngpoisson(
+# Another idea: since the filter can be a field which is 1 or 0 for each element of qp, maybe it could be inlined into one of the equations?
+
+
+# ValueError: incompatible shapes! (n_qp: 6, (454, 3, 3))
+# ValueError: material parameter array must have three dimensions! ('C' has 4)
+
+
+def c_mod(ts, coors, mode=None, **kwargs):
+    if mode == "qp":
+        pb = kwargs["problem"]
+
+        strain = pb.evaluate("ev_cauchy_strain.i.Omega(u_disp)", mode="qp")
+        damage = pb.evaluate("ev_integrate.i.Omega(u_phase)", mode="qp")
+
+        c = matcoefs.stiffness_from_youngpoisson(
             dim=2, young=E, poisson=NU, plane="strain"
-        ),
-        strain,
-    )
+        )
 
+        c_modified = np.zeros(
+            (strain.shape[0] * strain.shape[1], c.shape[0], c.shape[1])
+        )
 
-def c_mod():
-    return matcoefs.stiffness_from_youngpoisson(
-        dim=2, young=E, poisson=NU, plane="strain"
-    )
+        for i in range(strain.shape[0]):
+            for j in range(strain.shape[1]):
+                trace = strain[i][j][0][0] + strain[i][j][1][0]
 
+                if trace >= 0:
+                    c_modified[i * strain.shape[1] + j] = (
+                        damage[i][j][0] ** 2 + ETA
+                    ) * c
+                else:
+                    c_modified[i * strain.shape[1] + j] = (
+                        damage[i][j][0] ** 2 + ETA
+                    ) * tensors.get_deviator(c) + tensors.get_volumetric_tensor(c)
 
-def stress_mod(strain, strain_in, damage_in):
-    if np.trace(strain_in) >= 0:
-        sigma = (damage_in**2 + ETA) * stress(strain)
-    else:
-        sigma = tensors.get_deviator(
-            damage_in**2 + ETA
-        ) + tensors.get_volumetric_tensor(stress(strain))
-
-    # I have an idea that I can generate filter matrices eg... [[0, 1, 0], [1, 1, 1], [0, 1, 0]
-    # tensile filter = generate_filter_matrix(), compressive filter = ones() - tensile filter (inverted)
-    # Then multiply ((damage^2 + eta) * stress tensor) and ((damage^2 + eta) * stress_dev + stress_vol) by filter matrix
-    # Maybe just one filter... and then tensile = filter, compression = filter.T
-    # The filter gets calculated in the step function and then passed to the stress_mod function
-    # This way the only unknown is u_disp and calculations can be faster
-    # Try and write this out by hand to validate the idea
-    #
-    # Also think about where these filters are stored and how they get passed to this function
-
-    return sigma
-
-    # return max(phi, phi_last)
-    #
-    #
-    # I know the dimensions of the mesh, so actually phi doesn't have to be a field at all...
-    # It can just be a matrix that's managed independantly of the state variables
-    # It can be initialised pre loop and then updated in the step function
-    #
-    # Actuallyyyyyyy that might be hard because how do you know which element is which?
-    # This will only work if the equation allows matrix multiplication
-    # Remember (%s) * dw_term()""" % phi_matrix,
-
-
-def load(ts, coors, **kwargs):
-    print(ts.time)
-    return 0.001 * ts.time
+        return {"C": c_modified}
 
 
 def get_energy(coors, region=None, variable=None, **kwargs):
@@ -77,7 +74,6 @@ def get_energy(coors, region=None, variable=None, **kwargs):
     print("Initialising energy field.")
     return np.zeros(
         int(
-            # options["n_elements"],
             coors.shape[0],
         ),
         dtype=np.float64,
@@ -87,7 +83,6 @@ def get_energy(coors, region=None, variable=None, **kwargs):
 def update_energy(pb, strain, stress):
     # Get the current energy field
     phi = pb.get_variables()["phi"].data[0]
-    print(phi)
 
     for i in range(pb.domain.mesh.n_el):
         # Calculate trace ([xx] + [yy])
@@ -109,6 +104,37 @@ def update_energy(pb, strain, stress):
     return phi
 
 
+def get_filter(coors, region=None, variable=None, **kwargs):
+    """
+    Initialise the filter field.
+    """
+    print("Initialising filter field.")
+    return np.zeros(
+        int(
+            coors.shape[0],
+        ),
+        dtype=np.float64,
+    )
+
+
+def update_filter(strain):
+    filter = [
+        np.zeros(strain.shape[0] * strain.shape[1]),
+        np.empty(strain.shape[0] * strain.shape[1]),
+    ]
+
+    for i in range(strain.shape[0]):
+        for j in range(strain.shape[1]):
+            trace = strain[i][j][0] + strain[i][j][1]
+
+            if trace >= 0:
+                filter[0][i * strain.shape[1] + j] = 1
+
+    filter[1] = 1 - filter[0]
+
+    return filter
+
+
 def pre_process(pb):
     number_elements = pb.domain.mesh.n_el
     number_nodes = pb.domain.mesh.n_nod
@@ -118,11 +144,13 @@ def pre_process(pb):
 
 
 def step_hook(pb, ts, variables):
-    print(pb.ebcs[1].dofs)
-    pb.ebcs[1].dofs["u_disp.1"] = -ts.time
+    pb.ebcs[1].dofs["u_disp.1"] = ts.time
     strain_cur = pb.evaluate("ev_cauchy_strain.i.Omega(u_disp)", mode="el_avg")
     stress_cur = pb.evaluate("ev_cauchy_stress.i.Omega(m.C, u_disp)", mode="el_avg")
     damage_cur = pb.evaluate("ev_integrate.i.Omega(u_phase)", mode="el_avg")
+    strain_qp = pb.evaluate("ev_cauchy_strain.i.Omega(u_disp)", mode="qp")
+    pb.get_variables()["filter"].data[0] = update_filter(strain_qp)
+    # move elastic energy to setting function?
     pb.get_variables()["phi"].data[0] = update_energy(pb, strain_cur, stress_cur)
 
 
@@ -136,24 +164,27 @@ def post_process(out, pb, state, extend=False):
     ev = pb.evaluate
     stress = ev("ev_cauchy_stress.i.Omega(m.C, u_disp)", mode="el_avg")
     energy = ev("ev_integrate.i.Omega(phi)", mode="el_avg")
+    damage = ev("ev_integrate.i.Omega(u_phase)", mode="el_avg")
 
     vms = get_von_mises_stress(stress.squeeze())
     vms.shape = (vms.shape[0], 1, 1, 1)
+
     out["von_mises_stress"] = Struct(
         name="output_data", mode="cell", data=vms, dofs=None
     )
     out["elastic_energy"] = Struct(
         name="output_data", mode="cell", data=energy, dofs=None
     )
-
-    # pb.save_state(os.path.join(pb.output_dir, "test.vtk"), out=out)
+    out["damage"] = Struct(name="output_data", mode="cell", data=damage, dofs=None)
 
     return out  # needed?
 
 
 # Constants
-T0 = 0.0
-T1 = 1.0
+T0 = 0.0  # Initial time (always 0)
+T1 = 20.0  # Analogous to applied displacement (base units)
+DT = 0.1  # Time step
+STEPS = 10
 
 E = 210e3
 NU = 0.3
@@ -164,6 +195,7 @@ ETA = 1e-15
 
 ORDER = 2
 DEGREE = 2 * ORDER
+
 
 ####### TEMPORARY MESH #######
 from sfepy import data_dir
@@ -189,7 +221,7 @@ options = {
     "ls": "ls",
     "step_hook": "step_hook",
     #'parametric_hook' : 'parametric_hook', # can be used to programatically change problem
-    "output_dir": save_directory,  # this might not work the way I thought it does
+    "output_dir": save_directory,
     "pre_process_hook": "pre_process",
     "post_process_hook": "post_process",
 }
@@ -218,7 +250,13 @@ variables = {
         "parameter field",
         "damage",
         {"ic": "get_energy"},
-        1,
+        0,
+    ),
+    "filter": (
+        "parameter field",
+        "damage",
+        {"ic": "get_filter"},
+        0,
     ),
 }
 
@@ -231,11 +269,11 @@ materials = {
             "C": matcoefs.stiffness_from_youngpoisson(
                 dim=2, young=E, poisson=NU, plane="strain"
             ),
-            "C_mod": c_mod(),
             "GCLS": GC * LS,
             "GC_LS": GC / LS,
         },
     ),
+    "m_mod": "c_mod",
 }
 
 integrals = {
@@ -245,7 +283,7 @@ integrals = {
 
 # sfepy/examples/acoustics/acoustics3d.py - has some interesting equation syntax
 equations = {
-    "eq_disp": """dw_lin_elastic.i.Omega(m.C_mod, v_disp, u_disp) = 0""",
+    "eq_disp": """dw_lin_elastic.i.Omega(m_mod.C, v_disp, u_disp) = 0""",
     # "eq_phase": """dw_laplace.i.Omega(m.GCLS, v_phase, u_phase) + 2 * phi * dw_dot.i.Omega(v_phase, u_phase) + dw_dot.i.Omega(m.GC_LS, v_phase, u_phase) = dw_integrate.i.Omega(m.GC_LS, v_phase)""",
     # Currently running with no damage irreversibilty
     # Wierd 3rd term just to include phi for testing
@@ -254,7 +292,7 @@ equations = {
 
 functions = {
     "get_energy": (get_energy,),
-    "load": (load,),
+    "c_mod": (c_mod,),
 }
 
 ics = {
@@ -268,7 +306,7 @@ ebcs = {
     "load": (
         "Load",
         {"u_disp.0": 0.0, "u_disp.1": 0.0},
-    ),  # maybe set as a function of time
+    ),
 }
 
 solvers = {
@@ -276,7 +314,7 @@ solvers = {
     "nls": (
         "nls.newton",
         {
-            "i_max": 100,
+            "i_max": 100,  # should be 1 for linear-segregated
             "eps_a": 1e-6,
         },
     ),
@@ -287,7 +325,7 @@ solvers = {
             "t1": T1,
             # "dt": 0.01,  # need to make this dynamic...
             "dt": None,
-            "n_step": 50,
+            "n_step": STEPS,
             "quasistatic": True,
             "verbose": 1,
         },

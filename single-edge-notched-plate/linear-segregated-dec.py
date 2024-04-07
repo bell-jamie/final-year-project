@@ -71,7 +71,6 @@ def get_energy(coors, region=None, variable=None, **kwargs):
     """
     Initialise the energy field.
     """
-    print("Initialising energy field.")
     return np.zeros(
         int(
             coors.shape[0],
@@ -80,11 +79,8 @@ def get_energy(coors, region=None, variable=None, **kwargs):
     )
 
 
-def update_energy(pb, strain, stress):
-    # Get the current energy field
-    phi = pb.get_variables()["phi"].data[0]
-
-    for i in range(pb.domain.mesh.n_el):
+def update_energy(phi, strain, stress):
+    for i in range(strain.shape[0]):
         # Calculate trace ([xx] + [yy])
         trace = strain[i][0][0] + strain[i][0][1]
 
@@ -104,54 +100,51 @@ def update_energy(pb, strain, stress):
     return phi
 
 
-def get_filter(coors, region=None, variable=None, **kwargs):
-    """
-    Initialise the filter field.
-    """
-    print("Initialising filter field.")
-    return np.zeros(
-        int(
-            coors.shape[0],
-        ),
-        dtype=np.float64,
-    )
-
-
-def update_filter(strain):
-    filter = [
-        np.zeros(strain.shape[0] * strain.shape[1]),
-        np.empty(strain.shape[0] * strain.shape[1]),
-    ]
-
+def update_filters(filter_qp, filter_el, strain):
     for i in range(strain.shape[0]):
         for j in range(strain.shape[1]):
             trace = strain[i][j][0] + strain[i][j][1]
 
             if trace >= 0:
-                filter[0][i * strain.shape[1] + j] = 1
+                filter_qp[0][i * strain.shape[1] + j] = 1
 
-    filter[1] = 1 - filter[0]
+            if j == 0:
+                filter_el[0][i] = 1
 
-    return filter
+    filter_qp[1] = 1 - filter_qp[0]
+    filter_el[1] = 1 - filter_el[0]
+
+    return (filter_qp, filter_el)
 
 
 def pre_process(pb):
     number_elements = pb.domain.mesh.n_el
     number_nodes = pb.domain.mesh.n_nod
-    options.update({"n_elements": number_elements, "n_nodes": number_nodes})
-    print("The number of elements in the mesh is " + str(number_elements))
-    print("The number of nodes in the mesh is " + str(number_nodes))
+
+    # Initialise filters - magic number is qp per element
+    qp_zeros = np.zeros(number_elements * 6, np.float64)
+    el_zeros = np.zeros(number_elements)
+    pb.filter_qp = [qp_zeros, qp_zeros]
+    pb.filter_el = [el_zeros, el_zeros]
 
 
 def step_hook(pb, ts, variables):
+    # Update the load boundary condition
     pb.ebcs[1].dofs["u_disp.1"] = ts.time
-    strain_cur = pb.evaluate("ev_cauchy_strain.i.Omega(u_disp)", mode="el_avg")
-    stress_cur = pb.evaluate("ev_cauchy_stress.i.Omega(m.C, u_disp)", mode="el_avg")
-    damage_cur = pb.evaluate("ev_integrate.i.Omega(u_phase)", mode="el_avg")
-    strain_qp = pb.evaluate("ev_cauchy_strain.i.Omega(u_disp)", mode="qp")
-    pb.get_variables()["filter"].data[0] = update_filter(strain_qp)
-    # move elastic energy to setting function?
-    pb.get_variables()["phi"].data[0] = update_energy(pb, strain_cur, stress_cur)
+    # Update the filters - currently not used
+    (pb.filter_qp, pb.filter_el) = update_filters(
+        pb.filter_qp,
+        pb.filter_el,
+        pb.evaluate("ev_cauchy_strain.i.Omega(u_disp)", mode="qp"),
+    )
+    # Update the elastic energy
+    print("Updating elastic energy...")
+    pb.get_variables()["phi"].data[0] = update_energy(
+        pb.get_variables()["phi"].data[0],
+        pb.evaluate("ev_cauchy_strain.i.Omega(u_disp)", mode="el_avg"),
+        pb.evaluate("ev_cauchy_stress.i.Omega(m.C, u_disp)", mode="el_avg"),
+    )
+    print("Done!")
 
 
 def post_process(out, pb, state, extend=False):
@@ -182,9 +175,9 @@ def post_process(out, pb, state, extend=False):
 
 # Constants
 T0 = 0.0  # Initial time (always 0)
-T1 = 20.0  # Analogous to applied displacement (base units)
+T1 = 7.0e-3  # Analogous to applied displacement (base units)
 DT = 0.1  # Time step
-STEPS = 10
+STEPS = 30
 
 E = 210e3
 NU = 0.3
@@ -201,12 +194,16 @@ DEGREE = 2 * ORDER
 from sfepy import data_dir
 from sfepy.discrete.fem import Mesh
 
-filename_mesh = data_dir + "/meshes/2d/rectangle_tri.mesh"
+# Test mesh:
+# filename_mesh = data_dir + "/meshes/2d/rectangle_tri.mesh"
+
+# For mesh conversion use:
+# sfepy-convert -d 2 test.msh test.vtk
 ##############################
 
 current_datetime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 script_directory = os.path.dirname(__file__)
-# filename_mesh = os.path.join(script_directory, "meshes", "notchedPlateTriangular.vtk")
+filename_mesh = os.path.join(script_directory, "meshes", "notchedPlateTriangularPy.vtk")
 save_directory = os.path.join(
     script_directory,
     "files",
@@ -226,10 +223,17 @@ options = {
     "post_process_hook": "post_process",
 }
 
+# Should be y > 0.49 - use 8.9 for test mesh
 regions = {
     "Omega": "all",
-    "Load": ("vertices in (y > 8.9)", "facet"),  # should be y > 0.49
-    "Fixed": ("vertices in (y < -8.9)", "facet"),  # should be y < -0.49
+    "Load": (
+        "vertices in (y > 0.49)",
+        "facet",
+    ),
+    "Fixed": (
+        "vertices in (y < -0.49)",
+        "facet",
+    ),
 }
 
 fields = {
@@ -252,17 +256,8 @@ variables = {
         {"ic": "get_energy"},
         0,
     ),
-    "filter": (
-        "parameter field",
-        "damage",
-        {"ic": "get_filter"},
-        0,
-    ),
 }
 
-# may not be necessary
-# material-nonlinearity.py shows that the material can be defined using a function directly
-# In that example the mu value is strain dependant, however I can't tell whether it's anisotropic
 materials = {
     "m": (
         {
@@ -298,7 +293,6 @@ functions = {
 ics = {
     "phase": ("Omega", {"damage": 1.0}),
     "disp": ("Omega", {"displacement": 0.0}),
-    # "energy": ("Omega", {"phi": 0.0}),
 }
 
 ebcs = {
@@ -314,7 +308,7 @@ solvers = {
     "nls": (
         "nls.newton",
         {
-            "i_max": 100,  # should be 1 for linear-segregated
+            "i_max": 100,  # should be 1 for linear
             "eps_a": 1e-6,
         },
     ),

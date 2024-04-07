@@ -58,5 +58,7 @@ gmsh.model.geo.synchronize()
 gmsh.model.mesh.generate(2)
 #gmsh.fltk.run()
 gmsh.write(joinpath(@__DIR__, "notchedPlateTriangular.msh"))
-gmsh.write(joinpath(@__DIR__, "notchedPlateTriangular.vtk"))
 gmsh.finalize()
+
+# In order to use mesh with SfePy, run the following command in the terminal:
+# sfepy-convert -d 2 notchedPlateTriangular.msh notchedPlateTriangular.vtk

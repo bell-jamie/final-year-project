@@ -17,8 +17,6 @@
 - **Linear segregated**
   - _In development_
   - Elastic energy field is "out-of-date" before being used in displacement equation
-  - Elastic energy term is split into two terms
-  - Mesh is a rectangular test mesh with triangular elements
 
 ### Problems
 
@@ -40,5 +38,6 @@
 ### Python & SfePy
 
 - Fix issues with linear segregated
-- Implement proper mesh using SfePy mesh conversion tools
+- <s>Combined separated energy terms in the damage weak form equation</s>
+- <s>Implement proper mesh using SfePy mesh conversion tools</s>
 - Dt is fixed and needs to either be adaptive, or displacement based (add to step hook)

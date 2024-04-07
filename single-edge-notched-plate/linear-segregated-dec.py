@@ -36,7 +36,10 @@ import os
 # ValueError: material parameter array must have three dimensions! ('C' has 4)
 
 
-def c_mod(ts, coors, mode=None, **kwargs):
+def c_mat(ts, coors, mode=None, **kwargs):
+    """
+    Calculates the modified stiffness tensor for each quadrature point.
+    """
     if mode == "qp":
         pb = kwargs["problem"]
 
@@ -47,104 +50,60 @@ def c_mod(ts, coors, mode=None, **kwargs):
             dim=2, young=E, poisson=NU, plane="strain"
         )
 
-        c_modified = np.zeros(
-            (strain.shape[0] * strain.shape[1], c.shape[0], c.shape[1])
-        )
+        c_mod = np.zeros((strain.shape[0] * strain.shape[1], c.shape[0], c.shape[1]))
 
         for i in range(strain.shape[0]):
             for j in range(strain.shape[1]):
                 trace = strain[i][j][0][0] + strain[i][j][1][0]
 
                 if trace >= 0:
-                    c_modified[i * strain.shape[1] + j] = (
-                        damage[i][j][0] ** 2 + ETA
-                    ) * c
+                    c_mod[i * strain.shape[1] + j] = (damage[i][j][0] ** 2 + ETA) * c
                 else:
-                    c_modified[i * strain.shape[1] + j] = (
+                    c_mod[i * strain.shape[1] + j] = (
                         damage[i][j][0] ** 2 + ETA
                     ) * tensors.get_deviator(c) + tensors.get_volumetric_tensor(c)
 
-        return {"C": c_modified}
+        return {"C": c_mod}
 
 
-def get_energy(coors, region=None, variable=None, **kwargs):
+def phi_mat(ts, coors, mode=None, **kwargs):
     """
-    Initialise the energy field.
+    Calculates the elastic strain energy coefficient for each quadrature point.
+    The elastic strain energy for each point must be monotonically increasing with time to reflect the irreversible nature of damage.
+    The factor of 1/2 from the calculation of the energy has been cancelled with the factor of 2 in the weak form.
     """
-    return np.zeros(
-        int(
-            coors.shape[0],
-        ),
-        dtype=np.float64,
-    )
+    if mode == "qp":
+        pb = kwargs["problem"]
 
+        strain = pb.evaluate("ev_cauchy_strain.i.Omega(u_disp)", mode="qp")
+        stress = pb.evaluate("ev_cauchy_stress.i.Omega(m.C, u_disp)", mode="qp")
 
-def update_energy(phi, strain, stress):
-    for i in range(strain.shape[0]):
-        # Calculate trace ([xx] + [yy])
-        trace = strain[i][0][0] + strain[i][0][1]
+        phi = np.zeros((strain.shape[0] * strain.shape[1], 1, 1))
 
-        # Calculate the energy in the element
-        full_energy = 0.5 * np.tensordot(strain[i][0], stress[i][0])
-        decomp_energy = 0.5 * np.tensordot(
-            tensors.get_deviator(stress[i][0]),
-            tensors.get_deviator(strain[i][0]),
-        )
+        for i in range(strain.shape[0]):
+            for j in range(strain.shape[1]):
+                trace = strain[i][j][0][0] + strain[i][j][1][0]
 
-        # Update the energy field
-        if trace >= 0.0:
-            phi[i] = max(phi[i], full_energy)
-        else:
-            phi[i] = max(phi[i], decomp_energy)
+                if trace >= 0:
+                    phi[i * strain.shape[1] + j] = max(
+                        phi[i * strain.shape[1] + j],
+                        np.tensordot(strain[i][j], stress[i][j]),
+                    )
+                else:
+                    phi[i * strain.shape[1] + j] = max(
+                        phi[i * strain.shape[1] + j],
+                        np.tensordot(
+                            tensors.get_deviator(stress[i][j]),
+                            tensors.get_deviator(strain[i][j]),
+                        ),
+                    )
 
-    return phi
-
-
-def update_filters(filter_qp, filter_el, strain):
-    for i in range(strain.shape[0]):
-        for j in range(strain.shape[1]):
-            trace = strain[i][j][0] + strain[i][j][1]
-
-            if trace >= 0:
-                filter_qp[0][i * strain.shape[1] + j] = 1
-
-            if j == 0:
-                filter_el[0][i] = 1
-
-    filter_qp[1] = 1 - filter_qp[0]
-    filter_el[1] = 1 - filter_el[0]
-
-    return (filter_qp, filter_el)
-
-
-def pre_process(pb):
-    number_elements = pb.domain.mesh.n_el
-    number_nodes = pb.domain.mesh.n_nod
-
-    # Initialise filters - magic number is qp per element
-    qp_zeros = np.zeros(number_elements * 6, np.float64)
-    el_zeros = np.zeros(number_elements)
-    pb.filter_qp = [qp_zeros, qp_zeros]
-    pb.filter_el = [el_zeros, el_zeros]
+        return {"phi": phi}
 
 
 def step_hook(pb, ts, variables):
     # Update the load boundary condition
     pb.ebcs[1].dofs["u_disp.1"] = ts.time
-    # Update the filters - currently not used
-    (pb.filter_qp, pb.filter_el) = update_filters(
-        pb.filter_qp,
-        pb.filter_el,
-        pb.evaluate("ev_cauchy_strain.i.Omega(u_disp)", mode="qp"),
-    )
-    # Update the elastic energy
-    print("Updating elastic energy...")
-    pb.get_variables()["phi"].data[0] = update_energy(
-        pb.get_variables()["phi"].data[0],
-        pb.evaluate("ev_cauchy_strain.i.Omega(u_disp)", mode="el_avg"),
-        pb.evaluate("ev_cauchy_stress.i.Omega(m.C, u_disp)", mode="el_avg"),
-    )
-    print("Done!")
 
 
 def post_process(out, pb, state, extend=False):
@@ -156,7 +115,7 @@ def post_process(out, pb, state, extend=False):
 
     ev = pb.evaluate
     stress = ev("ev_cauchy_stress.i.Omega(m.C, u_disp)", mode="el_avg")
-    energy = ev("ev_integrate.i.Omega(phi)", mode="el_avg")
+    # energy = ev("ev_integrate.i.Omega(phi)", mode="el_avg")
     damage = ev("ev_integrate.i.Omega(u_phase)", mode="el_avg")
 
     vms = get_von_mises_stress(stress.squeeze())
@@ -165,25 +124,25 @@ def post_process(out, pb, state, extend=False):
     out["von_mises_stress"] = Struct(
         name="output_data", mode="cell", data=vms, dofs=None
     )
-    out["elastic_energy"] = Struct(
-        name="output_data", mode="cell", data=energy, dofs=None
-    )
+    # out["elastic_energy"] = Struct(
+    #     name="output_data", mode="cell", data=energy, dofs=None
+    # )
     out["damage"] = Struct(name="output_data", mode="cell", data=damage, dofs=None)
 
     return out  # needed?
 
 
-# Constants
+# Constants (SI units, with mm as base length unit)
 T0 = 0.0  # Initial time (always 0)
-T1 = 7.0e-3  # Analogous to applied displacement (base units)
-DT = 0.1  # Time step
-STEPS = 30
+T1 = 10.0e-3  # Analogous to applied displacement (mm)
+DT = 1e-5  # Time step
+STEPS = 50  # T1 / DT
 
-E = 210e3
-NU = 0.3
+E = 210e3  # Young's modulus (MPa)
+NU = 0.3  # Poisson's ratio
 
-LS = 0.0075
-GC = 2.7
+LS = 0.0075  # Length scale (mm)
+GC = 2.7  # Fracture energy (N/mm)
 ETA = 1e-15
 
 ORDER = 2
@@ -203,7 +162,7 @@ from sfepy.discrete.fem import Mesh
 
 current_datetime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 script_directory = os.path.dirname(__file__)
-filename_mesh = os.path.join(script_directory, "meshes", "notchedPlateTriangularPy.vtk")
+filename_mesh = os.path.join(script_directory, "meshes", "notchedPlateTriangular.vtk")
 save_directory = os.path.join(
     script_directory,
     "files",
@@ -219,11 +178,13 @@ options = {
     "step_hook": "step_hook",
     #'parametric_hook' : 'parametric_hook', # can be used to programatically change problem
     "output_dir": save_directory,
-    "pre_process_hook": "pre_process",
+    # "pre_process_hook": "pre_process",
     "post_process_hook": "post_process",
 }
 
-# Should be y > 0.49 - use 8.9 for test mesh
+# For test mesh, use > 8.9, < -8.9
+# For notchedPlateTriangular, use > 0.49, < -0.49
+# For notchedPlateRahaman, use > 0.99, < 0.01
 regions = {
     "Omega": "all",
     "Load": (
@@ -250,12 +211,6 @@ variables = {
         1,
     ),
     "v_phase": ("test field", "damage", "u_phase"),
-    "phi": (
-        "parameter field",
-        "damage",
-        {"ic": "get_energy"},
-        0,
-    ),
 }
 
 materials = {
@@ -268,7 +223,8 @@ materials = {
             "GC_LS": GC / LS,
         },
     ),
-    "m_mod": "c_mod",
+    "m_mod": "c_mat",
+    "energy": "phi_mat",
 }
 
 integrals = {
@@ -276,18 +232,14 @@ integrals = {
     "i": DEGREE,
 }
 
-# sfepy/examples/acoustics/acoustics3d.py - has some interesting equation syntax
 equations = {
     "eq_disp": """dw_lin_elastic.i.Omega(m_mod.C, v_disp, u_disp) = 0""",
-    # "eq_phase": """dw_laplace.i.Omega(m.GCLS, v_phase, u_phase) + 2 * phi * dw_dot.i.Omega(v_phase, u_phase) + dw_dot.i.Omega(m.GC_LS, v_phase, u_phase) = dw_integrate.i.Omega(m.GC_LS, v_phase)""",
-    # Currently running with no damage irreversibilty
-    # Wierd 3rd term just to include phi for testing
-    "eq_phase": """dw_laplace.i.Omega(m.GCLS, v_phase, u_phase) + 2 * dw_dot.i.Omega(v_phase, u_phase) + 2 * dw_dot.i.Omega(v_phase, phi) + dw_dot.i.Omega(m.GC_LS, v_phase, u_phase) = dw_integrate.i.Omega(m.GC_LS, v_phase)""",
+    "eq_phase": """dw_laplace.i.Omega(m.GCLS, v_phase, u_phase) + dw_dot.i.Omega(energy.phi, v_phase, u_phase) + dw_dot.i.Omega(m.GC_LS, v_phase, u_phase) = dw_integrate.i.Omega(m.GC_LS, v_phase)""",
 }
 
 functions = {
-    "get_energy": (get_energy,),
-    "c_mod": (c_mod,),
+    "c_mat": (c_mat,),
+    "phi_mat": (phi_mat,),
 }
 
 ics = {
@@ -308,7 +260,7 @@ solvers = {
     "nls": (
         "nls.newton",
         {
-            "i_max": 100,  # should be 1 for linear
+            "i_max": 10,  # should be 1 for linear
             "eps_a": 1e-6,
         },
     ),

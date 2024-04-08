@@ -40,4 +40,6 @@
 - Fix issues with linear segregated
 - <s>Combined separated energy terms in the damage weak form equation</s>
 - <s>Implement proper mesh using SfePy mesh conversion tools</s>
-- Dt is fixed and needs to either be adaptive, or displacement based (add to step hook)
+- <s>Dt is fixed and needs to either be adaptive, or displacement based (add to step hook)</s>
+- <s>Fixed energy history decreasing by intialising pb.phi in pre_process hook so that "step - 1" energy value is stored</s>
+- Create transfinite mesh to be used with damage-based initial crack

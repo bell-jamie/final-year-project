@@ -1,8 +1,6 @@
 from __future__ import absolute_import
 from datetime import datetime
 from sfepy.mechanics import matcoefs, tensors
-
-# from sfepy.discrete import Problem
 from sfepy.discrete.fem import Mesh
 from sfepy.discrete.conditions import EssentialBC, Conditions
 from sfepy.discrete import Problem
@@ -29,26 +27,26 @@ def material(ts, coors, mode=None, **kwargs):
     if mode == "qp":
         pb = kwargs["problem"]
 
-        strain = pb.evaluate("ev_cauchy_strain.i.Omega(u_disp)", mode="qp")
-        damage = pb.evaluate("ev_integrate.i.Omega(u_phase)", mode="qp")
+        stn = (-1, 3, 1)
+        dam = (-1, 1, 1)
 
-        c = matcoefs.stiffness_from_youngpoisson(
-            dim=2, young=E, poisson=NU, plane="strain"
-        )
+        strain = pb.evaluate("ev_cauchy_strain.i.Omega(u_disp)", mode="qp").reshape(stn)
+        damage = pb.evaluate("ev_integrate.i.Omega(u_phase)", mode="qp").reshape(dam)
+
+        cns = (1, 1, 1)
+        dim = (strain.shape[0], 1, 1)
+
+        c = CMAT
+        c_dev = tensors.get_deviator(c)
+        c_vol = tensors.get_volumetric_tensor(c)
         c_mod = np.zeros((strain.shape[0] * strain.shape[1], c.shape[0], c.shape[1]))
-        gcls = np.full((1, 1, 1), GC * LS)
-        gc_ls = np.full((1, 1, 1), GC / LS)
+        gcls = np.full(cns, GC * LS)
+        gc_ls = np.full(cns, GC / LS)
 
-        for i in range(strain.shape[0]):
-            for j in range(strain.shape[1]):
-                trace = strain[i][j][0][0] + strain[i][j][1][0]
-
-                if trace >= 0:
-                    c_mod[i * strain.shape[1] + j] = (damage[i][j][0] ** 2 + ETA) * c
-                else:
-                    c_mod[i * strain.shape[1] + j] = (
-                        damage[i][j][0] ** 2 + ETA
-                    ) * tensors.get_deviator(c) + tensors.get_volumetric_tensor(c)
+        trace = strain[:, 0, 0] + strain[:, 1, 0]
+        c_tens = (damage[:, 0, 0] ** 2 + ETA).reshape(dim) * c
+        c_comp = (damage[:, 0, 0] ** 2 + ETA).reshape(dim) * c_dev + c_vol
+        c_mod = np.where(trace.reshape(dim) >= 0, c_tens, c_comp)
 
         return {"C": c_mod, "GCLS": gcls, "GC_LS": gc_ls}
 
@@ -59,32 +57,33 @@ def energy(ts, coors, mode=None, **kwargs):
     The elastic strain energy for each point must be monotonically increasing with time to reflect the irreversible nature of damage.
     The factor of 1/2 from the calculation of the energy has been cancelled with the factor of 2 in the weak form.
     """
-    if mode == "qp":
-        pb = kwargs["problem"]
-        phi = pb.phi
+    if mode != "qp":
+        return
 
-        strain = pb.evaluate("ev_cauchy_strain.i.Omega(u_disp)", mode="qp")
-        stress = pb.evaluate("ev_cauchy_stress.i.Omega(c.C, u_disp)", mode="qp")
+    def dev(tensor):
+        trace = tensor[:, 0, 0] + tensor[:, 1, 0]
+        tensor[:, 0, 0] -= trace / 2
+        tensor[:, 1, 0] -= trace / 2
+        return tensor
 
-        for i in range(strain.shape[0]):
-            for j in range(strain.shape[1]):
-                trace = strain[i][j][0][0] + strain[i][j][1][0]
+    pb = kwargs["problem"]
+    phi_old = pb.phi
 
-                if trace >= 0:
-                    phi[i * strain.shape[1] + j] = max(
-                        phi[i * strain.shape[1] + j],
-                        np.tensordot(strain[i][j], stress[i][j]),
-                    )
-                else:
-                    phi[i * strain.shape[1] + j] = max(
-                        phi[i * strain.shape[1] + j],
-                        np.tensordot(
-                            tensors.get_deviator(stress[i][j]),
-                            tensors.get_deviator(strain[i][j]),
-                        ),
-                    )
+    s = (-1, 3, 1)
 
-        return {"phi": phi}
+    strain = pb.evaluate("ev_cauchy_strain.i.Omega(u_disp)", mode="qp").reshape(s)
+    stress = pb.evaluate("ev_cauchy_stress.i.Omega(c.C, u_disp)", mode="qp").reshape(s)
+
+    trace = strain[:, 0, 0] + strain[:, 1, 0]
+    product = np.einsum("ijk, ijk -> i", stress, strain)
+    dev_product = np.einsum("ijk, ijk -> i", dev(stress), dev(strain))
+    phi_new = np.where(trace >= 0, product, dev_product).reshape(phi_old.shape)
+    phi = np.maximum(phi_old, phi_new)
+
+    return {"phi": phi}
+
+
+# def energy_fast(ts)
 
 
 def adapt_time_step(ts, status, adt, problem, verbose=False):
@@ -159,7 +158,7 @@ from sfepy.discrete.fem import Mesh
 
 current_datetime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 script_directory = os.path.dirname(__file__)
-filename_mesh = os.path.join(script_directory, "meshes", "notchedPlateRahaman.vtk")
+filename_mesh = os.path.join(script_directory, "meshes", "notchedPlateTriangular.vtk")
 save_directory = os.path.join(
     script_directory,
     "files",
@@ -187,13 +186,17 @@ options = {
 regions = {
     "Omega": "all",
     "Load": (
-        "vertices in (y > 0.99)",
+        "vertices in (y > 0.49)",
         "facet",
     ),
     "Fixed": (
-        "vertices in (y < 0.01)",
+        "vertices in (y < -0.49)",
         "facet",
     ),
+    # "Crack": (
+    #     "vertices in ((x < 0.05) & (x > -0.05) & (y < 0) & (y > -0.5))",
+    #     "vertex",
+    # ),
 }
 
 fields = {
@@ -244,6 +247,7 @@ ebcs = {
         "Load",
         {"u_disp.0": 0.0, "u_disp.1": 0.0},
     ),
+    # "crack": ("Crack", {"u_phase.all": 0.0}),
 }
 
 solvers = {
@@ -252,7 +256,7 @@ solvers = {
         "nls.newton",
         {
             "i_max": 20,  # should be 1 for linear
-            "eps_a": 5e-11,
+            "eps_a": 1e-6,
         },
     ),
     "ts": (

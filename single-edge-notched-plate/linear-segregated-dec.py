@@ -4,7 +4,10 @@ from sfepy.mechanics import matcoefs, tensors
 from sfepy.discrete.fem import Mesh
 from sfepy.discrete.conditions import EssentialBC, Conditions
 from sfepy.discrete import Problem
+from sfepy.base.base import Struct
+from sfepy.mechanics.tensors import get_von_mises_stress
 
+import csv
 import numpy as np
 import os
 
@@ -79,58 +82,97 @@ def energy(ts, coors, mode=None, **kwargs):
     dev_product = np.einsum("ijk, ijk -> i", dev(stress), dev(strain))
     phi_new = np.where(trace >= 0, product, dev_product).reshape(phi_old.shape)
     phi = np.maximum(phi_old, phi_new)
+    pb.phi = phi
 
     return {"phi": phi}
 
 
-# def energy_fast(ts)
+def time_step(ts, status, adt, problem, verbose=False):
+    """
+    Sets the time step (load displacement) based on the current time.
+    """
+    print("Time step hook: setting time step.")
 
-
-def adapt_time_step(ts, status, adt, problem, verbose=False):
-    if ts.time < 5e-3:
-        ts.set_time_step(1e-4)
+    if ts.time == 1e-3:
+        ts.time += 2.5e-3 - 1e-3
+    elif ts.time < 5e-3:
+        ts.time += 1e-4 - 1e-3
     else:
-        ts.set_time_step(1e-5)
+        ts.time += 1e-5 - 1e-3
 
     return True
 
 
 def pre_process(pb):
-    # Initialise the elastic energy - 6 quad points per element
+    """
+    Initialises the elastic energy - 6 quad points per element.
+    """
+    print("Pre process hook: initialising elastic energy.")
     pb.phi = np.zeros((pb.domain.mesh.n_el * 6, 1, 1))
 
 
 def step_hook(pb, ts, variables):
-    # Update the load boundary condition
+    """
+    Gets called after each step, right before the post process hook.
+    """
+    print("Step hook: updating load boundary condition.")
     pb.ebcs[1].dofs["u_disp.1"] = ts.time
+
+
+def nls_iter_hook(pb, nls, vec, it, err, err0):
+    """
+    Gets called before each iteration of the nonlinear solver.
+    """
+    print("Iteration hook: updating materials.")
+    pb.update_materials()
 
 
 def post_process(out, pb, state, extend=False):
     """
     Calculate and output strain and stress for given displacements.
     """
-    from sfepy.base.base import Struct
-    from sfepy.mechanics.tensors import get_von_mises_stress
+    print("Post process hook: calculating stress, damage and load force.")
 
+    # Von mises stress
     ev = pb.evaluate
     stress = ev("ev_cauchy_stress.i.Omega(c.C, u_disp)", mode="el_avg")
-    damage = ev("ev_integrate.i.Omega(u_phase)", mode="el_avg")
-
     vms = get_von_mises_stress(stress.squeeze())
     vms.shape = (vms.shape[0], 1, 1, 1)
+    out["vm_stress"] = Struct(name="output_data", mode="cell", data=vms, dofs=None)
 
-    out["von_mises_stress"] = Struct(
-        name="output_data", mode="cell", data=vms, dofs=None
-    )
+    # Damage
+    damage = ev("ev_integrate.i.Omega(u_phase)", mode="el_avg")
     out["damage"] = Struct(name="output_data", mode="cell", data=damage, dofs=None)
+    damage_sum = 1 - np.einsum("ijkl->", damage) / pb.domain.mesh.n_el
+    energy_sum = np.einsum("ijk->", pb.phi) / pb.domain.mesh.n_el
 
-    return out  # needed?
+    # Force
+    stress_mod = ev("ev_cauchy_stress.i.Load(m.C, u_disp)", mode="el_avg")
+    force = stress_mod[:, :, 1, 0]
+    force = np.einsum("ij ->", force) / pb.domain.regions["Load"].vertices.size
+    with open(os.path.join(save_directory, "log.csv"), mode="a", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow([pb.ts.time, force])
+
+    # Display stats
+    print(f"\n############### STATS ###############")
+    print(f"Displacement: {pb.ts.time}")
+    print(f"Force: {force}")
+    print(f"Damage: {damage_sum}")
+    print(f"Energy: {energy_sum}")
+    print(f"#####################################\n")
+
+    return out
+
+
+def post_process_hook_final():
+    pass
 
 
 # Constants (SI units, with mm as base length unit)
 T0 = 0.0  # Initial time (always 0)
-T1 = 10.0e-3  # Analogous to applied displacement (mm)
-DT = 2.5e-3  # Time step
+T1 = 9.0e-3  # Analogous to applied displacement (mm)
+DT = 2.5e-3  # Initial time step
 # STEPS = int(T1 / DT) // 20
 
 E = 210e3  # Young's modulus (MPa)
@@ -144,18 +186,6 @@ CMAT = matcoefs.stiffness_from_youngpoisson(dim=2, young=E, poisson=NU, plane="s
 ORDER = 2
 DEGREE = 2 * ORDER
 
-
-####### TEMPORARY MESH #######
-from sfepy import data_dir
-from sfepy.discrete.fem import Mesh
-
-# Test mesh:
-# filename_mesh = data_dir + "/meshes/2d/rectangle_tri.mesh"
-
-# For mesh conversion use:
-# sfepy-convert -d 2 test.msh test.vtk
-##############################
-
 current_datetime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 script_directory = os.path.dirname(__file__)
 filename_mesh = os.path.join(script_directory, "meshes", "notchedPlateTriangular.vtk")
@@ -165,17 +195,21 @@ save_directory = os.path.join(
     os.path.splitext(os.path.basename(__file__))[0] + "-py",
     current_datetime,
 )
-
 os.makedirs(save_directory, exist_ok=True)
+with open(os.path.join(save_directory, "log.csv"), mode="w", newline="") as file:
+    writer = csv.writer(file)
+    writer.writerow(["Displacement", "Force"])
 
 options = {
     "nls": "newton",
     "ls": "ls",
-    "step_hook": "step_hook",
-    #'parametric_hook' : 'parametric_hook', # can be used to programatically change problem
     "output_dir": save_directory,
     "pre_process_hook": "pre_process",
+    "nls_iter_hook": "nls_iter_hook",
+    "step_hook": "step_hook",
+    #'parametric_hook' : 'parametric_hook', - Can be used to programmatically change problem
     "post_process_hook": "post_process",
+    "post_process_hook_final": "post_process_hook_final",
     "save_times": 100,
     # "block_solve": True,
 }
@@ -187,10 +221,12 @@ regions = {
     "Omega": "all",
     "Load": (
         "vertices in (y > 0.49)",
+        # "vertices in (y > 0.99)",
         "facet",
     ),
     "Fixed": (
         "vertices in (y < -0.49)",
+        # "vertices in (y < 0.01)",
         "facet",
     ),
     # "Crack": (
@@ -259,6 +295,15 @@ solvers = {
             "eps_a": 1e-6,
         },
     ),
+    # "ts": (
+    #     "ts.simple",
+    #     {
+    #         "t0": T0,
+    #         "t1": T1,
+    #         "dt": DT,
+    #         "verbose": 1,
+    #     },
+    # ),
     "ts": (
         "ts.adaptive",
         {
@@ -272,7 +317,7 @@ solvers = {
             "dt_inc_wait": 5,
             "verbose": 1,
             "quasistatic": True,
-            "adapt_fun": adapt_time_step,
+            "adapt_fun": time_step,
         },
     ),
 }

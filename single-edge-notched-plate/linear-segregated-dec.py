@@ -20,6 +20,10 @@ import os
 # Eval equations function in Problem class might be a way to solve damage before calculating c_mod
 # Orr there is the update materials function which could somehow be called after the damage equation is solved
 
+# pb.status.nls_status is how you access the solver residual etc... Will be useful for backtracking
+
+# An exit criteria based on the magnitude of the load force would be nice - i.e. the force has been below a threshold value for a certain time
+
 
 def material(ts, coors, mode=None, **kwargs):
     """
@@ -87,18 +91,40 @@ def energy(ts, coors, mode=None, **kwargs):
     return {"phi": phi}
 
 
-def time_step(ts, status, adt, problem, verbose=False):
+def time_step(ts, status, adt, pb, verbose=False):
     """
-    Sets the time step (load displacement) based on the current time.
+    Sets the time step (load displacement) based on the current displacement.
+    Also saves the displacement, damage and elastic strain energy at the current time step.
+    If the solver residual is above a certain tolerance, the time step is halved and the field history is recovered.
     """
-    print("Time step hook: setting time step.")
+    print("Time step hook: setting displacement.")
+    u = pb.ebcs[1].dofs["u_disp.1"]
 
-    if ts.time == 1e-3:
-        ts.time += 2.5e-3 - 1e-3
-    elif ts.time < 5e-3:
-        ts.time += 1e-4 - 1e-3
+    if status.nls_status.err > TOL:
+        # Backtrack
+        u -= pb.step  # remove the step
+        pb.step /= 2  # halve the step
+
+        # Recover from field history
+        pb.get_variables()["u_disp"].data[0] = pb.history.u_disp
+        pb.get_variables()["u_phase"].data[0] = pb.history.u_phase
+        pb.phi = pb.history.phi
     else:
-        ts.time += 1e-5 - 1e-3
+        # Default step size
+        if u < 3e-3:
+            pb.step = 1e-3
+        elif u < 5e-3:
+            pb.step = 1e-4
+        else:
+            pb.step = 1e-5
+
+        # Save field history
+        pb.history.u_disp = pb.get_variables()["u_disp"].data[0]
+        pb.history.u_phase = pb.get_variables()["u_phase"].data[0]
+        pb.history.phi = pb.phi
+
+    # Update the displacement
+    ts.time = pb.ebcs[1].dofs["u_disp.1"] = u + pb.step
 
     return True
 
@@ -109,12 +135,14 @@ def pre_process(pb):
     """
     print("Pre process hook: initialising elastic energy.")
     pb.phi = np.zeros((pb.domain.mesh.n_el * 6, 1, 1))
+    pb.step = 0
 
 
 def step_hook(pb, ts, variables):
     """
     Gets called after each step, right before the post process hook.
     """
+    pass
     print("Step hook: updating load boundary condition.")
     pb.ebcs[1].dofs["u_disp.1"] = ts.time
 
@@ -132,9 +160,11 @@ def post_process(out, pb, state, extend=False):
     Calculate and output strain and stress for given displacements.
     """
     print("Post process hook: calculating stress, damage and load force.")
+    disp = pb.ebcs[1].dofs["u_disp.1"]
+    cells = pb.domain.mesh.n_el
+    ev = pb.evaluate
 
     # Von mises stress
-    ev = pb.evaluate
     stress = ev("ev_cauchy_stress.i.Omega(c.C, u_disp)", mode="el_avg")
     vms = get_von_mises_stress(stress.squeeze())
     vms.shape = (vms.shape[0], 1, 1, 1)
@@ -143,21 +173,24 @@ def post_process(out, pb, state, extend=False):
     # Damage
     damage = ev("ev_integrate.i.Omega(u_phase)", mode="el_avg")
     out["damage"] = Struct(name="output_data", mode="cell", data=damage, dofs=None)
-    damage_sum = 1 - np.einsum("ijkl->", damage) / pb.domain.mesh.n_el
-    energy_sum = np.einsum("ijk->", pb.phi) / pb.domain.mesh.n_el
+    damage_sum = 1 - np.einsum("ijkl->", damage) / cells
+    energy_sum = 0.5 * np.einsum("ijk->", pb.phi) / cells
 
     # Force
     stress_mod = ev("ev_cauchy_stress.i.Load(m.C, u_disp)", mode="el_avg")
     force = stress_mod[:, :, 1, 0]
     force = np.einsum("ij ->", force) / pb.domain.regions["Load"].vertices.size
+
+    # Write to log
     with open(os.path.join(save_directory, "log.csv"), mode="a", newline="") as file:
         writer = csv.writer(file)
-        writer.writerow([pb.ts.time, force])
+        writer.writerow([disp, force, damage_sum, energy_sum])
 
     # Display stats
     print(f"\n############### STATS ###############")
-    print(f"Displacement: {pb.ts.time}")
-    print(f"Force: {force}")
+    print(f"Step: {pb.ts.n_step}")
+    print(f"Displacement: {1000 * disp} mm")
+    print(f"Force: {force} N")
     print(f"Damage: {damage_sum}")
     print(f"Energy: {energy_sum}")
     print(f"#####################################\n")
@@ -165,15 +198,12 @@ def post_process(out, pb, state, extend=False):
     return out
 
 
-def post_process_hook_final():
-    pass
-
-
 # Constants (SI units, with mm as base length unit)
 T0 = 0.0  # Initial time (always 0)
-T1 = 9.0e-3  # Analogous to applied displacement (mm)
-DT = 2.5e-3  # Initial time step
-# STEPS = int(T1 / DT) // 20
+T1 = 9e-3 + 1e-3  # Final displacement (always add 1e-3 because of adaptive solver)
+DT = 2.5e-3  # Initial time step -- NOT USED
+TOL = 1e-8  # Tolerance for the nonlinear solver
+IMAX = 10  # Maximum number of solver iterations
 
 E = 210e3  # Young's modulus (MPa)
 NU = 0.3  # Poisson's ratio
@@ -188,7 +218,7 @@ DEGREE = 2 * ORDER
 
 current_datetime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 script_directory = os.path.dirname(__file__)
-filename_mesh = os.path.join(script_directory, "meshes", "notchedPlateTriangular.vtk")
+filename_mesh = os.path.join(script_directory, "meshes", "notchedPlateRahaman.vtk")
 save_directory = os.path.join(
     script_directory,
     "files",
@@ -198,7 +228,7 @@ save_directory = os.path.join(
 os.makedirs(save_directory, exist_ok=True)
 with open(os.path.join(save_directory, "log.csv"), mode="w", newline="") as file:
     writer = csv.writer(file)
-    writer.writerow(["Displacement", "Force"])
+    writer.writerow(["Displacement", "Force", "Damage", "Energy"])
 
 options = {
     "nls": "newton",
@@ -209,9 +239,9 @@ options = {
     "step_hook": "step_hook",
     #'parametric_hook' : 'parametric_hook', - Can be used to programmatically change problem
     "post_process_hook": "post_process",
-    "post_process_hook_final": "post_process_hook_final",
-    "save_times": 100,
-    # "block_solve": True,
+    # "post_process_hook_final": "post_process_hook_final",
+    "save_times": "all",
+    # "save_times": 100,
 }
 
 # For test mesh, use > 8.9, < -8.9
@@ -220,13 +250,13 @@ options = {
 regions = {
     "Omega": "all",
     "Load": (
-        "vertices in (y > 0.49)",
-        # "vertices in (y > 0.99)",
+        # "vertices in (y > 0.49)",
+        "vertices in (y > 0.99)",
         "facet",
     ),
     "Fixed": (
-        "vertices in (y < -0.49)",
-        # "vertices in (y < 0.01)",
+        # "vertices in (y < -0.49)",
+        "vertices in (y < 0.01)",
         "facet",
     ),
     # "Crack": (
@@ -281,7 +311,8 @@ ebcs = {
     "fixed": ("Fixed", {"u_disp.all": 0.0}),
     "load": (
         "Load",
-        {"u_disp.0": 0.0, "u_disp.1": 0.0},
+        {"u_disp.1": 0.0},
+        # {"u_disp.0": 0.0, "u_disp.1": 0.0},
     ),
     # "crack": ("Crack", {"u_phase.all": 0.0}),
 }
@@ -291,8 +322,8 @@ solvers = {
     "newton": (
         "nls.newton",
         {
-            "i_max": 20,  # should be 1 for linear
-            "eps_a": 1e-6,
+            "i_max": IMAX,
+            "eps_a": TOL,
         },
     ),
     # "ts": (
@@ -315,7 +346,7 @@ solvers = {
             "dt_inc_factor": 1.25,
             "dt_inc_on_iter": 4,
             "dt_inc_wait": 5,
-            "verbose": 1,
+            "verbose": 0,
             "quasistatic": True,
             "adapt_fun": time_step,
         },

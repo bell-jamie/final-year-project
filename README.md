@@ -34,6 +34,7 @@
 - Implement other problems
   - Double cantilever beam
   - Interface fracture
+- Cutbacks do not reset fields...
 
 ### Python & SfePy
 

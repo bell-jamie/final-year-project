@@ -27,7 +27,7 @@ const η = 1e-15
 const growth_rate = 1.2
 const max_cycles = 20
 const tol = 1e-6
-const δv_min = 1e-7 # 1e-7
+const δv_min = 1e-8 # 1e-7
 const δv_max = 1e-4 # 1e-5
 const v_init = 2.5e-3
 const v_app_max = 7e-3
@@ -46,7 +46,7 @@ const degree = 2 * order
 
 ## Run
 tick()
-NL_coupled_recursive_NCB()
+NL_coupled_recursive()
 tock()
 
 ## Plot

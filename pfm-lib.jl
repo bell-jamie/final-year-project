@@ -374,8 +374,8 @@ function NL_coupled_recursive()
     Ω = Triangulation(model)
     dΩ = Measure(Ω, degree)
 
-    phase = construct_phase(model)
-    disp = construct_disp(model, BCs.tags, BCs.masks)
+    phase_stable = construct_phase(model)
+    disp_stable = construct_disp(model, BCs.tags, BCs.masks)
 
     Γ_load = BoundaryTriangulation(model, tags = "load")
     dΓ_load = Measure(Γ_load, degree)
@@ -393,7 +393,11 @@ function NL_coupled_recursive()
     # Main loop
     while v_app < v_app_max
         @info "** Step: $count **" Time = fetch_timer() Increment = @sprintf("%.3e mm", δv) Displacement = @sprintf("%.3e mm", v_app)
-        ψ_prev = ψ_prev_stable # reset energy state
+
+        # Reset all fields to the stable state
+        ψ_prev = ψ_prev_stable
+        phase = phase_stable
+        disp = disp_stable
 
         for cycle ∈ 1:max_cycles
             phase.sh, pf_residual = step_phase_field(dΩ, phase, ψ_prev, tol, false)
@@ -413,8 +417,11 @@ function NL_coupled_recursive()
                 s_sum = sum(∫(phase.sh) * dΩ)
                 node_force = sum(∫(n_Γ_load ⋅ (σ_mod ∘ (ε(disp.uh), ε(disp.uh), phase.sh))) * dΓ_load)
 
+                # Update log and all stable states
                 push!(data_frame, (v_app, δv, node_force[2], ψ_sum, s_sum))
-                ψ_prev_stable = ψ_prev # saves energy state for the next step
+                ψ_prev_stable = ψ_prev
+                phase_stable = phase
+                disp_stable = disp
 
                 try
                     CSV.write(joinpath(save_directory, "log.csv"), data_frame)
@@ -440,7 +447,7 @@ function NL_coupled_recursive()
             v_app -= δv # remove half increment
 
             if δv < δv_min
-                @error "** δv < δv_min - solution failed (ish)**"
+                @error "** δv < δv_min - solution failed **"
                 @printf("\n------------------------------\n\n")
                 return
             else

@@ -1,5 +1,6 @@
 from __future__ import absolute_import
 from datetime import datetime
+from sfepy.discrete.problem import IndexedStruct
 from sfepy.mechanics import matcoefs, tensors
 from sfepy.discrete.fem import Mesh
 from sfepy.discrete.conditions import EssentialBC, Conditions
@@ -10,19 +11,6 @@ from sfepy.mechanics.tensors import get_von_mises_stress
 import csv
 import numpy as np
 import os
-
-
-# The material properties are being calculated before the damage equation, therefore will be out of date by the time the displacement equation is solved
-# This probably depends on whether my assumption of sequential solving is correct
-# Given the commandline output, it seems as though it is being solved as a multifield coupled problem
-# Reversing the field priority order will mean that the elastic strain energy will be out of date by the time damage is solved
-
-# Eval equations function in Problem class might be a way to solve damage before calculating c_mod
-# Orr there is the update materials function which could somehow be called after the damage equation is solved
-
-# pb.status.nls_status is how you access the solver residual etc... Will be useful for backtracking
-
-# An exit criteria based on the magnitude of the load force would be nice - i.e. the force has been below a threshold value for a certain time
 
 
 def material(ts, coors, mode=None, **kwargs):
@@ -100,16 +88,7 @@ def time_step(ts, status, adt, pb, verbose=False):
     print("Time step hook: setting displacement.")
     u = pb.ebcs[1].dofs["u_disp.1"]
 
-    if status.nls_status.err > TOL:
-        # Backtrack
-        u -= pb.step  # remove the step
-        pb.step /= 2  # halve the step
-
-        # Recover from field history
-        pb.get_variables()["u_disp"].data[0] = pb.history.u_disp
-        pb.get_variables()["u_phase"].data[0] = pb.history.u_phase
-        pb.phi = pb.history.phi
-    else:
+    if status.err < TOL:
         # Default step size
         if u < 3e-3:
             pb.step = 1e-3
@@ -118,41 +97,28 @@ def time_step(ts, status, adt, pb, verbose=False):
         else:
             pb.step = 1e-5
 
-        # Save field history
-        pb.history.u_disp = pb.get_variables()["u_disp"].data[0]
-        pb.history.u_phase = pb.get_variables()["u_phase"].data[0]
-        pb.history.phi = pb.phi
-
-    # Update the displacement
-    ts.time = pb.ebcs[1].dofs["u_disp.1"] = u + pb.step
+        # Update the displacement
+        ts.time = pb.ebcs[1].dofs["u_disp.1"] = u + pb.step
 
     return True
 
 
 def pre_process(pb):
     """
-    Initialises the elastic energy - 6 quad points per element.
+    Initialises the elastic energy.
     """
     print("Pre process hook: initialising elastic energy.")
-    pb.phi = np.zeros((pb.domain.mesh.n_el * 6, 1, 1))
+
+    match pb.domain.mesh.descs[0]:
+        case "2_3":
+            quad = 6
+        case "2_4":
+            quad = 9
+        case _:
+            raise ValueError("Unsupported element type.")
+
+    pb.phi = np.zeros((pb.domain.mesh.n_el * quad, 1, 1))
     pb.step = 0
-
-
-def step_hook(pb, ts, variables):
-    """
-    Gets called after each step, right before the post process hook.
-    """
-    pass
-    print("Step hook: updating load boundary condition.")
-    pb.ebcs[1].dofs["u_disp.1"] = ts.time
-
-
-def nls_iter_hook(pb, nls, vec, it, err, err0):
-    """
-    Gets called before each iteration of the nonlinear solver.
-    """
-    print("Iteration hook: updating materials.")
-    pb.update_materials()
 
 
 def post_process(out, pb, state, extend=False):
@@ -170,27 +136,24 @@ def post_process(out, pb, state, extend=False):
     vms.shape = (vms.shape[0], 1, 1, 1)
     out["vm_stress"] = Struct(name="output_data", mode="cell", data=vms, dofs=None)
 
-    # Damage
+    # Damage and energy
     damage = ev("ev_integrate.i.Omega(u_phase)", mode="el_avg")
-    out["damage"] = Struct(name="output_data", mode="cell", data=damage, dofs=None)
     damage_sum = 1 - np.einsum("ijkl->", damage) / cells
     energy_sum = 0.5 * np.einsum("ijk->", pb.phi) / cells
 
     # Force
-    stress_mod = ev("ev_cauchy_stress.i.Load(m.C, u_disp)", mode="el_avg")
-    force = stress_mod[:, :, 1, 0]
-    force = np.einsum("ij ->", force) / pb.domain.regions["Load"].vertices.size
+    force = ev("ev_cauchy_stress.i.Force(m.C, u_disp)", mode="eval")
 
     # Write to log
     with open(os.path.join(save_directory, "log.csv"), mode="a", newline="") as file:
         writer = csv.writer(file)
-        writer.writerow([disp, force, damage_sum, energy_sum])
+        writer.writerow([disp, force[0], damage_sum, energy_sum])
 
     # Display stats
     print(f"\n############### STATS ###############")
     print(f"Step: {pb.ts.n_step}")
     print(f"Displacement: {1000 * disp} mm")
-    print(f"Force: {force} N")
+    print(f"Force: {force[0]} N")
     print(f"Damage: {damage_sum}")
     print(f"Energy: {energy_sum}")
     print(f"#####################################\n")
@@ -203,7 +166,7 @@ T0 = 0.0  # Initial time (always 0)
 T1 = 9e-3 + 1e-3  # Final displacement (always add 1e-3 because of adaptive solver)
 DT = 2.5e-3  # Initial time step -- NOT USED
 TOL = 1e-8  # Tolerance for the nonlinear solver
-IMAX = 10  # Maximum number of solver iterations
+IMAX = 1  # Maximum number of solver iterations
 
 E = 210e3  # Young's modulus (MPa)
 NU = 0.3  # Poisson's ratio
@@ -218,7 +181,7 @@ DEGREE = 2 * ORDER
 
 current_datetime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 script_directory = os.path.dirname(__file__)
-filename_mesh = os.path.join(script_directory, "meshes", "notchedPlateRahaman.vtk")
+filename_mesh = os.path.join(script_directory, "meshes", "notchedPlateTriNoCrack.vtk")
 save_directory = os.path.join(
     script_directory,
     "files",
@@ -235,34 +198,28 @@ options = {
     "ls": "ls",
     "output_dir": save_directory,
     "pre_process_hook": "pre_process",
-    "nls_iter_hook": "nls_iter_hook",
-    "step_hook": "step_hook",
-    #'parametric_hook' : 'parametric_hook', - Can be used to programmatically change problem
     "post_process_hook": "post_process",
-    # "post_process_hook_final": "post_process_hook_final",
     "save_times": "all",
-    # "save_times": 100,
 }
 
-# For test mesh, use > 8.9, < -8.9
-# For notchedPlateTriangular, use > 0.49, < -0.49
-# For notchedPlateRahaman, use > 0.99, < 0.01
 regions = {
     "Omega": "all",
     "Load": (
-        # "vertices in (y > 0.49)",
+        "vertices in (y > 0.99)",
+        "vertex",
+    ),
+    "Fixed": (
+        "vertices in (y < 0.01)",
+        "vertex",
+    ),
+    "Force": (
         "vertices in (y > 0.99)",
         "facet",
     ),
-    "Fixed": (
-        # "vertices in (y < -0.49)",
-        "vertices in (y < 0.01)",
-        "facet",
+    "Crack": (
+        "vertices in (x < 0.5) & (y < 0.505) & (y > 0.495)",
+        "cell",
     ),
-    # "Crack": (
-    #     "vertices in ((x < 0.05) & (x > -0.05) & (y < 0) & (y > -0.5))",
-    #     "vertex",
-    # ),
 }
 
 fields = {
@@ -288,7 +245,6 @@ materials = {
 }
 
 integrals = {
-    # "i": ORDER,
     "i": DEGREE,
 }
 
@@ -309,12 +265,12 @@ ics = {
 
 ebcs = {
     "fixed": ("Fixed", {"u_disp.all": 0.0}),
-    "load": (
-        "Load",
-        {"u_disp.1": 0.0},
-        # {"u_disp.0": 0.0, "u_disp.1": 0.0},
-    ),
-    # "crack": ("Crack", {"u_phase.all": 0.0}),
+    "load": ("Load", {"u_disp.1": 0.0}),
+    # "load": (
+    #     "Load",
+    #     {"u_disp.0": 0.0, "u_disp.1": 0.0},
+    # ),
+    "crack": ("Crack", {"u_phase.all": 0.0}),
 }
 
 solvers = {
@@ -323,30 +279,14 @@ solvers = {
         "nls.newton",
         {
             "i_max": IMAX,
-            "eps_a": TOL,
         },
     ),
-    # "ts": (
-    #     "ts.simple",
-    #     {
-    #         "t0": T0,
-    #         "t1": T1,
-    #         "dt": DT,
-    #         "verbose": 1,
-    #     },
-    # ),
     "ts": (
         "ts.adaptive",
         {
             "t0": T0,
             "t1": T1,
             "dt": DT,
-            "dt_red_factor": 0.2,
-            "dt_red_max": 0.001,
-            "dt_inc_factor": 1.25,
-            "dt_inc_on_iter": 4,
-            "dt_inc_wait": 5,
-            "verbose": 0,
             "quasistatic": True,
             "adapt_fun": time_step,
         },

@@ -12,16 +12,26 @@ gmsh.initialize()
 gmsh.model.add("notchedPlateTriangular")
 
 # Corner Vertices
-gmsh.model.geo.addPoint(-w / 2, h / 2, 0, ms_b, 1)
-gmsh.model.geo.addPoint(w / 2, h / 2, 0, ms_b, 2)
-gmsh.model.geo.addPoint(w / 2, -h / 2, 0, ms_b, 3)
-gmsh.model.geo.addPoint(-w / 2, -h / 2, 0, ms_b, 4)
+# gmsh.model.geo.addPoint(-w / 2, h / 2, 0, ms_b, 1)
+# gmsh.model.geo.addPoint(w / 2, h / 2, 0, ms_b, 2)
+# gmsh.model.geo.addPoint(w / 2, -h / 2, 0, ms_b, 3)
+# gmsh.model.geo.addPoint(-w / 2, -h / 2, 0, ms_b, 4)
+
+gmsh.model.geo.addPoint(0, h, 0, ms_b, 1)
+gmsh.model.geo.addPoint(w, h, 0, ms_b, 2)
+gmsh.model.geo.addPoint(w, 0, 0, ms_b, 3)
+gmsh.model.geo.addPoint(0, 0, 0, ms_b, 4)
 
 # Crack Vertices
-gmsh.model.geo.addPoint(-w / 2, -cw / 2, 0, ms_c, 5)
-gmsh.model.geo.addPoint(0, -cw / 2, 0, ms_c, 6)
-gmsh.model.geo.addPoint(0, cw / 2, 0, ms_c, 7)
-gmsh.model.geo.addPoint(-w / 2, 0 + cw / 2, 0, ms_c, 8)
+# gmsh.model.geo.addPoint(-w / 2, -cw / 2, 0, ms_c, 5)
+# gmsh.model.geo.addPoint(0, -cw / 2, 0, ms_c, 6)
+# gmsh.model.geo.addPoint(0, cw / 2, 0, ms_c, 7)
+# gmsh.model.geo.addPoint(-w / 2, 0 + cw / 2, 0, ms_c, 8)
+
+gmsh.model.geo.addPoint(0, h / 2 - cw / 2, 0, ms_c, 5)
+gmsh.model.geo.addPoint(w / 2, h / 2 - cw / 2, 0, ms_c, 6)
+gmsh.model.geo.addPoint(w / 2, h / 2 + cw / 2, 0, ms_c, 7)
+gmsh.model.geo.addPoint(0, 0 + h / 2 + cw / 2, 0, ms_c, 8)
 
 # Lines
 gmsh.model.geo.addLine(1, 2, 1)
@@ -47,16 +57,16 @@ gmsh.model.geo.addPhysicalGroup(2, [1], 1, "domain")
 gmsh.model.mesh.field.add("Box", 11)
 gmsh.model.mesh.field.setNumber(11, "VIn", ms_bc)
 gmsh.model.mesh.field.setNumber(11, "VOut", ms_c)
-gmsh.model.mesh.field.setNumber(11, "XMin", 0 - 3 * cw)
-gmsh.model.mesh.field.setNumber(11, "XMax", w / 2)
-gmsh.model.mesh.field.setNumber(11, "YMin", -5 * cw)
-gmsh.model.mesh.field.setNumber(11, "YMax", 5 * cw)
+gmsh.model.mesh.field.setNumber(11, "XMin", w / 2 - 3 * cw)
+gmsh.model.mesh.field.setNumber(11, "XMax", w)
+gmsh.model.mesh.field.setNumber(11, "YMin", h / 2 - 5 * cw)
+gmsh.model.mesh.field.setNumber(11, "YMax", h / 2 + 5 * cw)
 gmsh.model.mesh.field.setAsBackgroundMesh(11)
 
 # Generate Mesh
 gmsh.model.geo.synchronize()
 gmsh.model.mesh.generate(2)
-#gmsh.fltk.run()
+# gmsh.fltk.run()
 gmsh.write(joinpath(@__DIR__, "notchedPlateTriangular.msh"))
 gmsh.finalize()
 

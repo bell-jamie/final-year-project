@@ -32,8 +32,8 @@ def material(ts, coors, mode=None, **kwargs):
     c = CMAT
     c_dev = tensors.get_deviator(c)
     c_vol = tensors.get_volumetric_tensor(c)
-    gcls = np.full((1, 1, 1), GC * LS)
-    gc_ls = np.full((1, 1, 1), GC / LS)
+    gcls = np.full((1, 1, 1), GC_I * LS)
+    gc_ls = np.full((1, 1, 1), GC_I / LS)
 
     trace = (strain[:, 0, 0] + strain[:, 1, 0]).reshape((len(strain), 1, 1))
     damage_factor = damage**2 + ETA
@@ -158,8 +158,9 @@ def nls_iter_hook(pb, nls, vec, it, err, err0):
     """
     Gets called before each iteration of the nonlinear solver.
     """
-    print("Iteration hook: updating materials.")
-    pb.update_materials()
+    pass
+    # print("Iteration hook: updating materials.")
+    # pb.update_materials()
 
 
 def post_process(out, pb, state, extend=False):
@@ -232,12 +233,6 @@ def post_process(out, pb, state, extend=False):
         print("Displacement exit criteria met.")
         pb.ts.time = T1
 
-    if force < FEX[0] and pb.exit + FEX[1] < disp:
-        print("Force exit criteria met.")
-        pb.ts.time = T1
-    elif force > FEX[0]:
-        pb.exit = disp
-
     return out
 
 
@@ -257,35 +252,34 @@ def post_process_final(problem, state):
     fig.savefig(os.path.join(save_directory, "force_displacement.png"))
 
 
-# Constants (SI units, with mm as base length unit)
+# Constants (SI units)
 T0 = 0.0  # Initial time (always 0)
 T1 = 1.0  # Arbitrary final time
 DT = 2.5e-3  # Initial time step -- NOT USED
-TOL = 1e-10  # Tolerance for the nonlinear solver
-TOL2 = 1e-11  # Tolerance for the cutback
+TOL = 1e-6  # Tolerance for the nonlinear solver
 IMAX = 10  # Maximum number of solver iterations
-FEX = (1.0, 5e-4)  # Exit force requirement (N) over which displacement (mm)
-DEX = 10e-3  # Exit displacement requirement (mm) - should this be very large for sensitivity study?
+DEX = 2e-3  # Exit displacement requirement (m)
 
-E = 210e3  # Young's modulus (MPa)
+E = 126e9  # Young's modulus (Pa)
 NU = 0.3  # Poisson's ratio
 
-LS = 0.0075  # Length scale (mm)
-GC = 2.7  # Fracture energy (N/mm)
-ETA = 1e-15
+LS = 0.03e-3  # Length scale (m)
+GC_I = 281  # Interface racture energy (N/m)
+GC_B = GC_I * 10  # Beam fracture energy (N/m)
+ETA = 1e-8
 CMAT = matcoefs.stiffness_from_youngpoisson(dim=2, young=E, poisson=NU, plane="strain")
 
 ORDER = 2
 DEGREE = 2 * ORDER
 
 steps = [
-    [0, 5e-5],
-    [5e-3, 2.5e-6],
+    [0, 1e-5],
+    [1e-3, 1e-6],
 ]
 
 current_datetime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 script_directory = os.path.dirname(__file__)
-filename_mesh = os.path.join(script_directory, "meshes", "notchedPlateRahaman.vtk")
+filename_mesh = os.path.join(script_directory, "meshes", "dcb.vtk")
 save_directory = os.path.join(
     script_directory,
     "files",
@@ -313,33 +307,25 @@ options = {
     "output_dir": save_directory,
     "pre_process_hook": "pre_process",
     "nls_iter_hook": "nls_iter_hook",
-    # "step_hook": "step_hook",
-    # 'parametric_hook' : 'parametric_hook', - Can be used to programmatically change problem
     "post_process_hook": "post_process",
     "post_process_hook_final": "post_process_final",
     "save_times": "all",
-    # "save_times": 100,
 }
 
 regions = {
     "Omega": "all",
     "Load": (
-        "vertices in (y > 0.99)",
+        "vertices in (x > 0.099) & (y > 0.00276)",
         "facet",
     ),
     "Fixed": (
-        "vertices in (y < 0.01)",
+        "vertices in (x > 0.099) & (y < 0.00266)",
         "facet",
     ),
-    # "Force": (
-    #     "vertices in (y > 0.99)",
-    #     "facet",
-    # ),
-    # "Crack": (
-    #     "vertices in (x < 0.5) & (y < 0.505) & (y > 0.495)",
-    #     "cell",
-    # ),
-    # Make crack smaller!
+    "Crack": (
+        "vertices in (x > 0.07) & (y < 0.00273) & (y > 0.00269)",
+        "cell",
+    ),
 }
 
 fields = {
@@ -366,7 +352,6 @@ materials = {
 }
 
 integrals = {
-    # "i": ORDER,
     "i": DEGREE,
 }
 
@@ -388,11 +373,7 @@ ics = {
 ebcs = {
     "fixed": ("Fixed", {"u_disp.all": 0.0}),
     "load": ("Load", {"u_disp.1": 0.0}),
-    # "load": (
-    #     "Load",
-    #     {"u_disp.0": 0.0, "u_disp.1": 0.0},
-    # ),
-    # "crack": ("Crack", {"u_phase.all": 0.0}),
+    "crack": ("Crack", {"u_phase.all": 0.0}),
 }
 
 solvers = {
@@ -404,15 +385,6 @@ solvers = {
             "eps_a": TOL,
         },
     ),
-    # "ts": (
-    #     "ts.simple",
-    #     {
-    #         "t0": T0,
-    #         "t1": T1,
-    #         "dt": DT,
-    #         "verbose": 1,
-    #     },
-    # ),
     "ts": (
         "ts.adaptive",
         {

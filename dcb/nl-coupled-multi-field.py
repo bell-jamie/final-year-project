@@ -14,68 +14,63 @@ import matplotlib.pyplot as plt
 import os
 
 
-def material(ts, coors, mode=None, **kwargs):
+def material_properties(ts, coors, mode=None, **kwargs):
     """
-    Calculates the modified stiffness tensor for each quadrature point.
-    Returns the original stiffness tensor and the modified stiffness tensor.
-    Also returns the Griffith criterion multiplied and divided by the length scale.
+    Function to calculate the field-dependant material properties.
     """
     if mode != "qp":
         return
 
     pb = kwargs["problem"]
     ev = pb.evaluate
+    dims = pb.phi.shape
 
-    strain = ev("ev_cauchy_strain.i.Omega(u_disp)", mode="qp").reshape((-1, 3, 1))
-    damage = ev("ev_integrate.i.Omega(u_phase)", mode="qp").reshape((-1, 1, 1))
+    # Evaluate and damage
+    strain = ev("ev_cauchy_strain.i.Omega(u_disp)", mode=mode).reshape(-1, 3, 1)
+    damage = ev("ev_integrate.i.Omega(u_phase)", mode=mode).reshape(-1, 1, 1)
 
-    c = CMAT
-    c_dev = tensors.get_deviator(c)
-    c_vol = tensors.get_volumetric_tensor(c)
-    gcls = np.full((1, 1, 1), GC_I * LS)
-    gc_ls = np.full((1, 1, 1), GC_I / LS)
-
-    trace = (strain[:, 0, 0] + strain[:, 1, 0]).reshape((len(strain), 1, 1))
-    damage_factor = damage**2 + ETA
-
-    c_tens = damage_factor * c
-    c_comp = damage_factor * c_dev + c_vol
-    c_mod = np.where(trace >= 0, c_tens, c_comp)
-
-    return {"C": c_mod, "GCLS": gcls, "GC_LS": gc_ls}
-
-
-def energy(ts, coors, mode=None, **kwargs):
-    """
-    Calculates the elastic strain energy coefficient for each quadrature point.
-    The elastic strain energy for each point must be monotonically increasing with time to reflect the irreversible nature of damage.
-    The factor of 1/2 from the calculation of the energy has been cancelled with the factor of 2 in the weak form.
-    """
-    if mode != "qp":
-        return
-
-    def dev(tensor):
-        trace = tensor[:, 0, 0] + tensor[:, 1, 0]
-        tensor[:, 0, 0] -= trace / 2
-        tensor[:, 1, 0] -= trace / 2
-        return tensor
-
-    pb = kwargs["problem"]
-    ev = pb.evaluate
-    phi_old = pb.phi
-
-    strain = ev("ev_cauchy_strain.i.Omega(u_disp)", mode="qp").reshape((-1, 3, 1))
-    stress = ev("ev_cauchy_stress.i.Omega(c.C, u_disp)", mode="qp").reshape((-1, 3, 1))
-
+    # Trace and trace mask for tensile or compressive
     trace = strain[:, 0, 0] + strain[:, 1, 0]
-    product = np.einsum("ijk, ijk -> i", stress, strain)
-    dev_product = np.einsum("ijk, ijk -> i", dev(stress), dev(strain))
+    trace_mask = trace >= 0
 
-    phi_new = np.where(trace >= 0, product, dev_product).reshape(phi_old.shape)
-    phi = np.maximum(phi_old, phi_new)
-    pb.phi = phi
+    # Deviatoric strain calculation
+    strain_dev = strain.copy()
+    strain_dev[:, :2, 0] -= trace[:, None] / 2
 
-    return {"phi": phi}
+    # Elastic strain energy for damage
+    pb.phi = np.maximum(
+        pb.phi,
+        np.where(
+            trace_mask,
+            np.einsum("jk, ijk, ikl -> i", CMAT, strain, strain),
+            np.einsum("jk, ijk, ikl -> i", CMAT, strain_dev, strain_dev),
+        ).reshape(dims),
+    )
+
+    # Linear elastic stiffness tensor
+    damage **= 2
+    c_mod = np.where(
+        trace_mask.reshape(dims),
+        (damage + ETA) * CMAT,
+        (damage + ETA) * CDEV + CVOL,
+    )
+
+    return {"C": c_mod, "phi": pb.phi}
+
+
+def material_constants(ts, coors, mode=None, **kwargs):
+    """
+    Outputs the material constants for the problem.
+    The fracture toughness is initialised before the problem is solved.
+    """
+    if mode != "qp":
+        return
+
+    # return {
+    #     "C": np.full((qps, 3, 3), CMAT),
+    #     "GCLS": np.full((qps, 1, 1), GC_I * LS),
+    #     "GC_LS": np.full((qps, 1, 1), GC_I / LS),
+    # }
 
 
 def time_step(ts, status, adt, pb, verbose=False):
@@ -83,44 +78,6 @@ def time_step(ts, status, adt, pb, verbose=False):
     Just a placeholder to allow the adaptive timestepper to be manually controlled.
     """
     return True
-
-
-# def time_step(ts, status, adt, pb, verbose=False):
-#     """
-#     Sets the time step (load displacement) based on the current displacement.
-#     Also saves the displacement, damage and elastic strain energy at the current time step.
-#     If the solver residual is above a certain tolerance, the time step is halved and the field history is recovered.
-#     """
-#     return True
-
-# print("Time step hook: setting displacement.")
-# u = pb.ebcs[1].dofs["u_disp.1"]
-
-# # if status.err > TOL:
-# #     # Backtrack
-# #     u -= pb.step  # remove the step
-# #     pb.step /= 2  # halve the step
-
-# #     # Recover from field history
-# #     pb.get_variables()["u_disp"].data[0] = pb.history.u_disp
-# #     pb.get_variables()["u_phase"].data[0] = pb.history.u_phase
-# #     pb.phi = pb.history.phi
-# # else:
-# # Default step size
-
-# # Get next time step
-# if steps and u >= steps[0][0]:
-#     pb.step = steps.pop(0)[1]
-
-# # # Save field history
-# # pb.history.u_disp = pb.get_variables()["u_disp"].data[0]
-# # pb.history.u_phase = pb.get_variables()["u_phase"].data[0]
-# # pb.history.phi = pb.phi
-
-# # Update the displacement
-# ts.time = pb.ebcs[1].dofs["u_disp.1"] = u + pb.step
-
-# return True
 
 
 def pre_process(pb):
@@ -131,36 +88,27 @@ def pre_process(pb):
 
     match pb.domain.mesh.descs[0]:
         case "2_3":
-            quad = 6
+            n_quads = 6
         case "2_4":
-            quad = 9
+            n_quads = 9
         case _:
             raise ValueError("Unsupported element type.")
 
     pb.step = 0
+    pb.disp = 0
     pb.exit = 0
     pb.cutbacks = 0
-    pb.phi = np.zeros((pb.domain.mesh.n_el * quad, 1, 1))
+    pb.phi = np.zeros((pb.domain.mesh.n_el * n_quads, 1, 1))
     pb.log = IndexedStruct(disp=[], force=[], damage=[], energy=[])
     pb.history = IndexedStruct
-
-
-# def step_hook(pb, ts, variables):
-#     """
-#     Gets called after each step, right before the post process hook.
-#     """
-#     pass
-#     print("Step hook: updating load boundary condition.")
-#     pb.ebcs[1].dofs["u_disp.1"] = ts.time
 
 
 def nls_iter_hook(pb, nls, vec, it, err, err0):
     """
     Gets called before each iteration of the nonlinear solver.
     """
-    pass
-    # print("Iteration hook: updating materials.")
-    # pb.update_materials()
+    print("Iteration hook: updating materials.")
+    pb.update_materials()
 
 
 def post_process(out, pb, state, extend=False):
@@ -193,7 +141,7 @@ def post_process(out, pb, state, extend=False):
     #     pb.history.phi = pb.phi
 
     # Von mises stress
-    stress = ev("ev_cauchy_stress.i.Omega(c.C, u_disp)", mode="el_avg")
+    stress = ev("ev_cauchy_stress.i.Omega(consts.C, u_disp)", mode="el_avg")
     vms = get_von_mises_stress(stress.squeeze()).reshape(stress.shape[0], 1, 1, 1)
     out["vm_stress"] = Struct(name="output_data", mode="cell", data=vms, dofs=None)
 
@@ -203,11 +151,14 @@ def post_process(out, pb, state, extend=False):
     energy_sum = 0.5 * np.einsum("ijk->", pb.phi) / cells
 
     # Force - [[xx], ->[yy]<-, [2xy]
-    force = ev("ev_cauchy_stress.i.Load(m.C, u_disp)", mode="eval")[1]
+    force = ev("ev_cauchy_stress.i.Load(mat.C, u_disp)", mode="eval")[1]
 
-    # Displacement step
+    # Set displacement step (don't apply it to EBC yet)
     pb.step = steps.pop(0)[1] if steps and disp >= steps[0][0] else pb.step
-    pb.ts.time = pb.ebcs[1].dofs["u_disp.1"] = disp + pb.step
+    pb.ts.time = pb.disp = disp + pb.step
+
+    # Apply displacement here for now...
+    pb.ebcs[1].dofs["u_disp.1"] = pb.disp
 
     # Write to log
     with open(os.path.join(save_directory, "log.csv"), mode="a", newline="") as file:
@@ -222,6 +173,7 @@ def post_process(out, pb, state, extend=False):
     # Display stats
     print(f"\n############### STATS ###############")
     print(f"Step: {pb.ts.n_step}")
+    print(f"Time: {datetime.now() - start_time}")
     print(f"Displacement: {1000 * disp} mm")
     print(f"Force: {force} N")
     print(f"Damage: {damage_sum}")
@@ -268,6 +220,8 @@ GC_I = 281  # Interface racture energy (N/m)
 GC_B = GC_I * 10  # Beam fracture energy (N/m)
 ETA = 1e-8
 CMAT = matcoefs.stiffness_from_youngpoisson(dim=2, young=E, poisson=NU, plane="strain")
+CDEV = tensors.get_deviator(CMAT)
+CVOL = tensors.get_volumetric_tensor(CMAT)
 
 ORDER = 2
 DEGREE = 2 * ORDER
@@ -277,14 +231,15 @@ steps = [
     [1e-3, 1e-6],
 ]
 
-current_datetime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+start_time = datetime.now()
+start_time_string = start_time.strftime("%Y-%m-%d_%H-%M-%S")
 script_directory = os.path.dirname(__file__)
 filename_mesh = os.path.join(script_directory, "meshes", "dcb.vtk")
 save_directory = os.path.join(
     script_directory,
     "files",
     os.path.splitext(os.path.basename(__file__))[0] + "-py",
-    current_datetime,
+    start_time_string,
 )
 os.makedirs(save_directory, exist_ok=True)
 
@@ -310,6 +265,7 @@ options = {
     "post_process_hook": "post_process",
     "post_process_hook_final": "post_process_final",
     "save_times": "all",
+    "verbose": False,  # Does this even work?
 }
 
 regions = {
@@ -346,9 +302,8 @@ variables = {
 }
 
 materials = {
-    "c": ({"C": CMAT},),
-    "m": "material",
-    "energy": "energy",
+    "mat": "material",
+    "consts": ({"C": CMAT, "GCLS": GC_I * LS, "GC_LS": GC_I / LS},),
 }
 
 integrals = {
@@ -356,13 +311,15 @@ integrals = {
 }
 
 equations = {
-    "eq_disp": """dw_lin_elastic.i.Omega(m.C, v_disp, u_disp) = 0""",
-    "eq_phase": """dw_laplace.i.Omega(m.GCLS, v_phase, u_phase) + dw_dot.i.Omega(energy.phi, v_phase, u_phase) + dw_dot.i.Omega(m.GC_LS, v_phase, u_phase) = dw_integrate.i.Omega(m.GC_LS, v_phase)""",
+    "eq_disp": """dw_lin_elastic.i.Omega(mat.C, v_disp, u_disp) = 0""",
+    "eq_phase": """dw_laplace.i.Omega(consts.GCLS, v_phase, u_phase) +
+        dw_dot.i.Omega(mat.phi, v_phase, u_phase) +
+        dw_dot.i.Omega(consts.GC_LS, v_phase, u_phase) =
+        dw_integrate.i.Omega(consts.GC_LS, v_phase)""",
 }
 
 functions = {
-    "material": (material,),
-    "energy": (energy,),
+    "material": (material_properties,),
 }
 
 ics = {

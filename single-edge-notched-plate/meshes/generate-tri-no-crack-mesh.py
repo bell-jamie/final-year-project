@@ -7,9 +7,9 @@ script_directory = os.path.dirname(os.path.abspath(__file__))
 MESH_WIDTH = 1.0
 MESH_HEIGHT = 1.0
 
-COARSE_SIZE = 0.025
-INTER_SIZE = 0.01
-FINE_SIZE = 0.001
+LS = 0.0075
+COARSE_SIZE = 2 * LS
+FINE_SIZE = LS / 5
 
 REFINE_HEIGHT = 0.05
 

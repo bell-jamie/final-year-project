@@ -24,33 +24,33 @@ const ls = 0.0075
 const Gc = 2.7
 const η = 1e-15
 
-const growth_rate = 1.2
-const max_cycles = 20
-const tol = 1e-6
-const δv_min = 1e-8 # 1e-7
-const δv_max = 1e-4 # 1e-5
+const max_cycles = 100
+const nl_tol = 1e-6
+const s_tol = 1e-3
+
+## Displacement Parameters
 const v_init = 2.5e-3
-const v_app_max = 7e-3
+const v_app_max = 6.5e-3
+const v_app_threshold = 5e-3
 
 ## Displacement Adaptive Stepping
-const δv_coarse = 1e-4
-const δv_refined = 1e-5
-const v_app_threshold = 5e-3
+const δv_min = 1e-7
+const δv_coarse_max = 1e-4
+const δv_refine_max = 1e-5
+const growth_rate = 1.2
+const damage_criteria = false
+const residual_criteria = true
 
 ## Model Setup
 mesh_file = joinpath(@__DIR__, "meshes", "notchedPlateRahaman.msh")
 save_directory = create_save_directory(@__FILE__)
-BCs = BoundaryConditions(["load", "fixed"], [(true, true), (true, true)], [2])
+bc = BoundaryConditions(["load", "fixed"], [(false, true), (true, true)], [2])
 const order = 2
 const degree = 2 * order
 
 ## Run
 tick()
-NL_coupled_recursive()
+nl_coupled_recursive()
 tock()
 
-## Plot
-plot_load_displacement("Single Edge Notched Plate - NL Coupled Recursive")
-plot_damage_displacement("Single Edge Notched Plate - NL Coupled Recursive")
-plot_increment_displacement("Single Edge Notched Plate - NL Coupled Recursive")
-plot_energy_displacement("Single Edge Notched Plate - NL Coupled Recursive")
+create_plots()

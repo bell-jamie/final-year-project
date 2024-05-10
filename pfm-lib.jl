@@ -1,3 +1,21 @@
+mutable struct PhaseFieldStruct
+    ϕ::FESpace
+    s::FESpace
+    sh::FEFunction
+end
+
+mutable struct DispFieldStruct
+    v::FESpace
+    u::FESpace
+    uh::FEFunction
+end
+
+struct BoundaryConditions
+    tags::Array{String}
+    masks::Array{Tuple{Bool,Bool}}
+    positions::Array{Int}
+end
+
 function elas_fourth_order_const_tensor(E::Float64, ν::Float64, planar_state::String)
     if planar_state == "PlaneStress"
         C1111 = E / (1 - ν * ν)
@@ -50,93 +68,78 @@ function ψ_pos(ε)
     end
 end
 
-function new_energy_state(ψ_prev, ψ_current)
+function history_function(ψ_prev, ψ_current)
     (true, max(ψ_prev, ψ_current))
 end
 
-function step_phase_field(dΩ, phase, ψh_prev)
-    a(s, ϕ) = ∫(Gc * ls * ∇(ϕ) ⋅ ∇(s) + 2 * ψh_prev * s * ϕ + (Gc / ls) * s * ϕ) * dΩ
+function restore_energy(ψ_prev)
+    (true, ψ_prev)
+end
+
+function step_phase_field!(dΩ, phase, ψ)
+    a(s, ϕ) = ∫(Gc * ls * ∇(ϕ) ⋅ ∇(s) + 2 * ψ * s * ϕ + (Gc / ls) * s * ϕ) * dΩ
     b(ϕ) = ∫((Gc / ls) * ϕ) * dΩ
-    op = AffineFEOperator(a, b, phase.U, phase.V0)
-    solve(op)
+    op = AffineFEOperator(a, b, phase.s, phase.ϕ)
+    phase.sh = solve(op)
 end
 
-function step_phase_field(dΩ, phase, ψ_prev, f_tol, debug)
-    res(s, ϕ) = ∫(Gc * ls * ∇(ϕ) ⋅ ∇(s) + 2 * ψ_prev * s * ϕ +
-        (Gc / ls) * s * ϕ) * dΩ - ∫((Gc / ls) * ϕ) * dΩ
-    jac(s, ds, ϕ) = ∫(Gc * ls * ∇(ϕ) ⋅ ∇(ds) + 2 * ψ_prev * ds * ϕ +
-        (Gc / ls) * ds * ϕ) * dΩ
-    op = FEOperator(res, jac, phase.U, phase.V0)
-    nls = NLSolver(show_trace = debug, method = :newton,
-        linesearch = BackTracking(), ftol = f_tol, iterations = 5)
+function step_phase_field!(dΩ, phase, ψ, tol, debug)
+    res(s, ϕ) = ∫(Gc * ls * ∇(ϕ) ⋅ ∇(s) + 2 * ψ * s * ϕ +
+                  (Gc / ls) * s * ϕ) * dΩ - ∫((Gc / ls) * ϕ) * dΩ
+    jac(s, ds, ϕ) = ∫(Gc * ls * ∇(ϕ) ⋅ ∇(ds) + 2 * ψ * ds * ϕ +
+                      (Gc / ls) * ds * ϕ) * dΩ
+    op = FEOperator(res, jac, phase.s, phase.ϕ)
+    nls = NLSolver(show_trace=debug, method=:newton,
+        linesearch=BackTracking(), ftol=tol, iterations=5)
     phase.sh, = solve!(phase.sh, FESolver(nls), op)
-    return phase.sh, norm(residual(op, phase.sh), Inf)
+    return norm(residual(op, phase.sh), Inf)
 end
 
-function step_disp_field(dΩ, disp, phase, v_app)
+function step_disp_field!(dΩ, disp, phase, v_app)
     a(u, v) = ∫(ε(v) ⊙ (σ_mod ∘ (ε(u), ε(disp.uh), phase.sh))) * dΩ
     b(v) = 0.0
-    disp.U = TrialFESpace(disp.V0, apply_BCs(v_app))
-    op = AffineFEOperator(a, b, disp.U, disp.V0)
-    solve(op)
+    disp.u = TrialFESpace(disp.v, apply_bcs(v_app))
+    op = AffineFEOperator(a, b, disp.u, disp.v)
+    disp.uh = solve(op)
 end
 
-function step_disp_field(dΩ, disp, phase, v_app, f_tol, debug)
-    #phase.U = TrialFESpace(phase.V0, [0])   # dodgy stuff!
+function step_disp_field!(dΩ, disp, phase, v_app, tol, debug)
     res(u, v) = ∫(ε(v) ⊙ (σ_mod ∘ (ε(u), ε(disp.uh), phase.sh))) * dΩ
     jac(u, du, v) = ∫(ε(v) ⊙ (σ_mod ∘ (ε(du), ε(disp.uh), phase.sh))) * dΩ
-    disp.U = TrialFESpace(disp.V0, apply_BCs(v_app))
-    op = FEOperator(res, jac, disp.U, disp.V0)
-    nls = NLSolver(show_trace = debug, method = :newton,
-        linesearch = BackTracking(), ftol = f_tol, iterations = 5)
+    disp.u = TrialFESpace(disp.v, apply_bcs(v_app))
+    op = FEOperator(res, jac, disp.u, disp.v)
+    nls = NLSolver(show_trace=debug, method=:newton,
+        linesearch=BackTracking(), ftol=tol, iterations=5)
     disp.uh, = solve!(disp.uh, FESolver(nls), op)
-    return disp.uh, norm(residual(op, disp.uh), Inf)
+    return norm(residual(op, disp.uh), Inf)
 end
 
-function step_coupled_fields(dΩ, phase, disp, ψ_prev, v_app, f_tol, debug)
-    disp.U = TrialFESpace(disp.V0, apply_BCs(v_app))
-    V0 = MultiFieldFESpace([phase.V0, disp.V0])
-    U = MultiFieldFESpace([phase.U, disp.U])
+function step_coupled_fields!(dΩ, phase, disp, ψ, v_app, tol, debug)
+    disp.u = TrialFESpace(disp.v, apply_bcs(v_app))
+    test = MultiFieldFESpace([phase.ϕ, disp.v])
+    trial = MultiFieldFESpace([phase.u, disp.u])
     res((s, u), (ϕ, v)) = ∫(Gc * ls * ∇(ϕ) ⋅ ∇(s) +
-        2 * ψ_prev * s * ϕ + (Gc / ls) * s * ϕ) * dΩ -
-        ∫((Gc / ls) * ϕ) * dΩ +
-        ∫(ε(v) ⊙ (σ_mod ∘ (ε(u), ε(disp.uh), phase.sh))) * dΩ
+                            2 * ψ * s * ϕ + (Gc / ls) * s * ϕ) * dΩ -
+                          ∫((Gc / ls) * ϕ) * dΩ +
+                          ∫(ε(v) ⊙ (σ_mod ∘ (ε(u), ε(disp.uh), phase.sh))) * dΩ
     jac((s, u), (ds, du), (ϕ, v)) = ∫(Gc * ls * ∇(ϕ) ⋅ ∇(ds) +
-        2 * ψ_prev * ds * ϕ + (Gc / ls) * ds * ϕ) * dΩ +
-        ∫(ε(v) ⊙ (σ_mod ∘ (ε(du), ε(disp.uh), phase.sh))) * dΩ
-    op = FEOperator(res, jac, U, V0)
-    nls = NLSolver(show_trace = debug, method = :newton,
-        linesearch = BackTracking(), ftol = f_tol, iterations = NL_iters)
-    sh_uh, = solve!(MultiFieldFEFunction([get_free_dof_values(phase.sh);
-        get_free_dof_values(disp.uh)], V0, [phase.sh; disp.uh]), FESolver(nls), op)
-    (sh_uh[1], sh_uh[2], norm(residual(op, sh_uh), Inf))
+                                      2 * ψ * ds * ϕ + (Gc / ls) * ds * ϕ) * dΩ +
+                                    ∫(ε(v) ⊙ (σ_mod ∘ (ε(du), ε(disp.uh), phase.sh))) * dΩ
+    op = FEOperator(res, jac, trial, test)
+    nls = NLSolver(show_trace=debug, method=:newton,
+        linesearch=BackTracking(), ftol=tol, iterations=nl_iters)
+    (phase.sh, disp.uh), = solve!(MultiFieldFEFunction([get_free_dof_values(phase.sh);
+                get_free_dof_values(disp.uh)], test, [phase.sh; disp.uh]), FESolver(nls), op)
+    return norm(residual(op, (phase.sh, disp.uh)), Inf)
 end
 
-function step_coupled_fields_parallel(dΩ, phase, disp, ψ_prev, v_app, f_tol, debug)
-    disp.U = TrialFESpace(disp.V0, apply_BCs(v_app))
-    V0 = MultiFieldFESpace([phase.V0, disp.V0])
-    U = MultiFieldFESpace([phase.U, disp.U])
-    res((s, u), (ϕ, v)) = ∫(Gc * ls * ∇(ϕ) ⋅ ∇(s) +
-        2 * ψ_prev * s * ϕ + (Gc / ls) * s * ϕ) * dΩ -
-        ∫((Gc / ls) * ϕ) * dΩ +
-        ∫(ε(v) ⊙ (σ_mod ∘ (ε(u), ε(disp.uh), phase.sh))) * dΩ
-    jac((s, u), (ds, du), (ϕ, v)) = ∫(Gc * ls * ∇(ϕ) ⋅ ∇(ds) +
-        2 * ψ_prev * ds * ϕ + (Gc / ls) * ds * ϕ) * dΩ +
-        ∫(ε(v) ⊙ (σ_mod ∘ (ε(du), ε(disp.uh), phase.sh))) * dΩ
-    op = FEOperator(res, jac, U, V0)
-    nls = PETScNonlinearSolver()
-    sh_uh, = solve!(MultiFieldFEFunction([get_free_dof_values(phase.sh);
-        get_free_dof_values(disp.uh)], V0, [phase.sh; disp.uh]), FESolver(nls), op)
-    (sh_uh[1], sh_uh[2], norm(residual(op, sh_uh), Inf))
-end
-
-function apply_BCs(v_app)
-    BC_bool = fill(false, 2 * length(BCs.tags))
-    for position ∈ BCs.positions
-        BC_bool[position] = true
+function apply_bcs(v_app)
+    bc_bool = fill(false, 2 * length(bc.tags))
+    for position ∈ bc.positions
+        bc_bool[position] = true
     end
     conditions = []
-    for pair ∈ eachslice(reshape(BC_bool, 2, :), dims = 2)
+    for pair ∈ eachslice(reshape(bc_bool, 2, :), dims=2)
         if pair[1] && pair[2]
             push!(conditions, VectorValue(v_app, v_app))
         elseif pair[1] && !pair[2]
@@ -156,48 +159,46 @@ end
 
 function increment(δv::Float64, v_app::Float64)
     if v_app > v_app_threshold
-        min(δv_refined, δv * growth_rate)
+        min(δv_refine_max, δv * growth_rate)
     else
-        increment(δv)
+        min(δv_coarse_max, δv * growth_rate)
     end
 end
 
 function increment(δv::Float64, history::Array{Float64}, aggression::Float64)
     # this needs momentum as it can't see ahead and therefore should be cautious // or we just let cutbacks deal with it
     current = history[end]
-    previous = history[end - 1]
+    previous = history[end-1]
     grad_norm = (abs(previous - current) / previous) / δv
     @printf("Grad norm: %.3e\n", grad_norm)
-    min(increment(δv), max(δv_min, δv ^ (1 / (aggression * grad_norm))))
+    min(increment(δv), max(δv_min, δv^(1 / (aggression * grad_norm))))
 end
 
 function construct_phase(model)
     reffe = ReferenceFE(lagrangian, Float64, order)
-    test = TestFESpace(model, reffe, conformity = :H1) #,
-        #dirichlet_tags = ["crack"],
-        #dirichlet_masks = [true])
+    test = TestFESpace(model, reffe, conformity=:H1)
     trial = TrialFESpace(test)
     field = FEFunction(test, ones(num_free_dofs(test)))
-    return PhaseFieldStruct(test, trial, field) # V0, U, sh
+    return PhaseFieldStruct(test, trial, field) # ϕ, s, sh
 end
 
 function construct_disp(model, tags, masks)
     reffe = ReferenceFE(lagrangian, VectorValue{2,Float64}, order)
-    test = TestFESpace(model, reffe, conformity = :H1,
-        dirichlet_tags = tags,
-        dirichlet_masks = masks)
+    test = TestFESpace(model, reffe, conformity=:H1,
+        dirichlet_tags=tags,
+        dirichlet_masks=masks)
     trial = TrialFESpace(test)
     field = zero(test)
-    return DispFieldStruct(test, trial, field) # V0, U, uh
+    return DispFieldStruct(test, trial, field) # v, u, uh
 end
 
 function project(q, model, dΩ)
     # This is inefficient and could be run once at the start
     reffe = ReferenceFE(lagrangian, Float64, order)
-    V = FESpace(model, reffe, conformity = :L2)
+    test = FESpace(model, reffe, conformity=:L2)
     a(u, v) = ∫(u * v) * dΩ
     l(v) = ∫(v * q) * dΩ
-    op = AffineFEOperator(a, l, V, V)
+    op = AffineFEOperator(a, l, test, test)
     solve(op)
 end
 
@@ -208,9 +209,9 @@ function linear_segregated()
     dΩ = Measure(Ω, degree)
 
     phase = construct_phase(model)
-    disp = construct_disp(model, BCs.tags, BCs.masks)
+    disp = construct_disp(model, bc.tags, bc.masks)
 
-    Γ_load = BoundaryTriangulation(model, tags = "load")
+    Γ_load = BoundaryTriangulation(model, tags="load")
     dΓ_load = Measure(Γ_load, degree)
     n_Γ_load = get_normal_vector(Γ_load)
 
@@ -220,8 +221,8 @@ function linear_segregated()
     v_app = δv
     ψ_prev = CellState(0.0, dΩ)
 
-    sim_log = DataFrame(Displacement = Float64[0.0], Increment = Float64[v_app],
-        Force = Float64[0.0], Energy = Float64[0.0], Damage = Float64[1.0])
+    sim_log = DataFrame(Displacement=Float64[0.0], Increment=Float64[v_app],
+        Force=Float64[0.0], Energy=Float64[0.0], Damage=Float64[1.0])
 
     # Main loop
     while v_app < v_app_max
@@ -234,14 +235,14 @@ function linear_segregated()
         for cycle ∈ 1:max_cycles
             ψh_prev = project(ψ_prev, model, dΩ) # re-added this just to make sure it's not the cause of issues
 
-            # while you're in here mucking around with energy states, make sure you add this to the other solvers if necessary - ψ * h * _prev 
+            # while you're in here mucking around with energy states, make sure you add this to the other solvers if necessary - ψ * h * _prev
 
             err = abs(sum(∫(Gc * ls * ∇(phase.sh) ⋅ ∇(phase.sh) + 2 * ψh_prev * phase.sh *
-                phase.sh + (Gc / ls) * phase.sh * phase.sh) * dΩ -
-                ∫((Gc / ls) * phase.sh) * dΩ)) / abs(sum(∫((Gc / ls) * phase.sh) * dΩ))
+                                                                  phase.sh + (Gc / ls) * phase.sh * phase.sh) * dΩ -
+                          ∫((Gc / ls) * phase.sh) * dΩ)) / abs(sum(∫((Gc / ls) * phase.sh) * dΩ))
 
-            phase.sh = step_phase_field(dΩ, phase, ψh_prev)
-            disp.uh = step_disp_field(dΩ, disp, phase, v_app)
+            step_phase_field!(dΩ, phase, ψh_prev)
+            step_disp_field!(dΩ, disp, phase, v_app)
 
             @info "Cycle: $cycle" Relative_Error = @sprintf("%.3e", err)
 
@@ -251,7 +252,7 @@ function linear_segregated()
                 break
             end
         end
-        
+
         @info "** Step complete **"
         @printf("\n------------------------------\n\n")
 
@@ -282,16 +283,25 @@ end
 
 function linear_segregated_parallel(ranks)
     options = "-ksp_type cg -pc_type gamg -ksp_monitor"
-    GridapPETSc.with(args = split(options)) do
+    GridapPETSc.with(args=split(options)) do
         # Initialise domain, spaces, measures and boundary conditions
         model = GmshDiscreteModel(ranks, mesh_file)
         Ω = Triangulation(model)
         dΩ = Measure(Ω, degree)
 
-        phase = construct_phase(model)
-        disp = construct_disp(model, BCs.tags, BCs.masks)
+        ###################### CONSTRUCT FIELDS ######################
+        reffe_phase = ReferenceFE(lagrangian, Float64, order)
+        test_phase = TestFESpace(model, reffe_phase, conformity=:H1)
+        trial_phase = TrialFESpace(test_phase)
 
-        Γ_load = BoundaryTriangulation(model, tags = "load")
+        reffe_disp = ReferenceFE(lagrangian, VectorValue{2,Float64}, order)
+        test_disp = TestFESpace(model, reffe_disp, conformity=:H1,
+            dirichlet_tags = bc.tags,
+            dirichlet_masks = bc.masks)
+        trial_disp = TrialFESpace(test_disp)
+        ##############################################################
+
+        Γ_load = BoundaryTriangulation(model, tags="load")
         dΓ_load = Measure(Γ_load, degree)
         n_Γ_load = get_normal_vector(Γ_load)
 
@@ -301,8 +311,96 @@ function linear_segregated_parallel(ranks)
         v_app = δv
         ψ_prev = CellState(0.0, dΩ)
 
-        data_frame = DataFrame(Displacement = Float64[0.0], Increment = Float64[v_app],
-            Force = Float64[0.0], Energy = Float64[0.0], Damage = Float64[1.0])
+        data_frame = DataFrame(Displacement=Float64[0.0], Increment=Float64[v_app],
+            Force=Float64[0.0], Energy=Float64[0.0], Damage=Float64[1.0])
+
+        # Main loop
+        while v_app < v_app_max
+            if v_app > v_app_threshold
+                δv = δv_refined
+            end
+
+            @info "** Step: $count **" Time = fetch_timer() Increment = @sprintf("%.3e mm", δv) Displacement = @sprintf("%.3e mm", v_app)
+
+            for cycle ∈ 1:max_cycles
+                err = abs(sum(∫(Gc * ls * ∇(sh) ⋅ ∇(sh) + 2 * ψ_prev * sh *
+                                                          sh + (Gc / ls) * sh * sh) * dΩ -
+                              ∫((Gc / ls) * sh) * dΩ)) / abs(sum(∫((Gc / ls) * sh) * dΩ))
+
+                ################# PHASE FIELD #################
+                a_pf(s, ϕ) = ∫(Gc * ls * ∇(ϕ) ⋅ ∇(s) + 2 * ψ_prev * s * ϕ + (Gc / ls) * s * ϕ) * dΩ
+                b_pf(ϕ) = ∫((Gc / ls) * ϕ) * dΩ
+                op_pf = AffineFEOperator(a_pf, b_pf, trial_phase, test_phase)
+                sh = solve(PETScLinearSolver(), op_pf)
+                ###############################################
+
+                ############# DISPLACEMENT FIELD ##############
+                a_disp(u, v) = ∫(ε(v) ⊙ (σ_mod ∘ (ε(u), ε(uh), sh))) * dΩ
+                b_disp(v) = 0.0
+                disp_trial = TrialFESpace(disp_test, apply_bcs(v_app))
+                op_disp = AffineFEOperator(a_disp, b_disp, disp_trial, disp_test)
+                uh = solve(PETScLinearSolver(), op_disp)
+                ###############################################
+
+                @info "Cycle: $cycle" Relative_Error = @sprintf("%.3e", err)
+
+                update_state!(new_energy_state, ψ_prev, ψ_pos ∘ ε(uh))
+
+                if err < tol
+                    break
+                end
+            end
+
+            @info "** Step complete **"
+            @printf("\n------------------------------\n\n")
+
+            ψ_sum = sum(∫(ψ_pos ∘ ε(uh)) * dΩ)
+            s_sum = sum(∫(sh) * dΩ)
+            node_force = sum(∫(n_Γ_load ⋅ (σ_mod ∘ (ε(uh), ε(uh), sh))) * dΓ_load)
+
+            push!(data_frame, (v_app, δv, node_force[2], ψ_sum, s_sum))
+
+            try
+                CSV.write(joinpath(save_directory, "log.csv"), data_frame)
+            catch
+                @error "Error writing to CSV file"
+            end
+
+            if mod(count, 10) == 0 # write every nth iteration
+                #write_solution(Ω, disp, phase, count)
+            end
+
+            v_app += δv
+            count += 1
+        end
+
+        #write_solution(Ω, disp, phase, count)
+    end
+end
+
+function linear_segregated_parallel_old(ranks)
+    options = "-ksp_type cg -pc_type gamg -ksp_monitor"
+    GridapPETSc.with(args=split(options)) do
+        # Initialise domain, spaces, measures and boundary conditions
+        model = GmshDiscreteModel(ranks, mesh_file)
+        Ω = Triangulation(model)
+        dΩ = Measure(Ω, degree)
+
+        phase = construct_phase(model)
+        disp = construct_disp(model, bc.tags, bc.masks)
+
+        Γ_load = BoundaryTriangulation(model, tags="load")
+        dΓ_load = Measure(Γ_load, degree)
+        n_Γ_load = get_normal_vector(Γ_load)
+
+        # Initialise variables, arrays and cell states
+        count = 1
+        δv = δv_coarse
+        v_app = δv
+        ψ_prev = CellState(0.0, dΩ)
+
+        data_frame = DataFrame(Displacement=Float64[0.0], Increment=Float64[v_app],
+            Force=Float64[0.0], Energy=Float64[0.0], Damage=Float64[1.0])
 
         # Main loop
         while v_app < v_app_max
@@ -315,7 +413,7 @@ function linear_segregated_parallel(ranks)
             for cycle ∈ 1:max_cycles
                 ################# PHASE FIELD #################
                 a_pf(s, ϕ) = ∫(Gc * ls * ∇(ϕ) ⋅ ∇(s) + 2 * ψ_prev * s * ϕ + (Gc / ls) * s * ϕ) * dΩ
-                b_pf(ϕ) = ∫((Gc /ls) * ϕ) * dΩ
+                b_pf(ϕ) = ∫((Gc / ls) * ϕ) * dΩ
                 op_pf = AffineFEOperator(a_pf, b_pf, phase.U, phase.V0)
                 phase.sh = solve(PETScLinearSolver(), op_pf)
                 ###############################################
@@ -323,14 +421,14 @@ function linear_segregated_parallel(ranks)
                 ############# DISPLACEMENT FIELD ##############
                 a_disp(u, v) = ∫(ε(v) ⊙ (σ_mod ∘ (ε(u), ε(disp.uh), phase.sh))) * dΩ
                 b_disp(v) = 0.0
-                disp.U = TrialFESpace(disp.V0, apply_BCs(v_app))
+                disp.U = TrialFESpace(disp.V0, apply_bcs(v_app))
                 op_disp = AffineFEOperator(a_disp, b_disp, disp.U, disp.V0)
                 disp.uh = solve(PETScLinearSolver(), op_disp)
                 ###############################################
 
                 err = abs(sum(∫(Gc * ls * ∇(phase.sh) ⋅ ∇(phase.sh) + 2 * ψ_prev * phase.sh *
-                    phase.sh + (Gc / ls) * phase.sh * phase.sh) * dΩ -
-                    ∫((Gc / ls) * phase.sh) * dΩ)) / abs(sum(∫((Gc / ls) * phase.sh) * dΩ))
+                                                                      phase.sh + (Gc / ls) * phase.sh * phase.sh) * dΩ -
+                              ∫((Gc / ls) * phase.sh) * dΩ)) / abs(sum(∫((Gc / ls) * phase.sh) * dΩ))
 
                 @info "Cycle: $cycle" Relative_Error = @sprintf("%.3e", err)
 
@@ -340,7 +438,7 @@ function linear_segregated_parallel(ranks)
                     break
                 end
             end
-            
+
             @info "** Step complete **"
             @printf("\n------------------------------\n\n")
 
@@ -364,87 +462,70 @@ function linear_segregated_parallel(ranks)
             count += 1
         end
 
-        write_solution(Ω, disp, phase, count)
+        write_solution(Ω, disp, phase, data_frame, count, 1)
     end
 end
 
-function NL_coupled_recursive()
-    # Initialise domain, spaces, measures and boundary conditions
+function nl_coupled_recursive()
     model = GmshDiscreteModel(mesh_file)
     Ω = Triangulation(model)
     dΩ = Measure(Ω, degree)
 
-    phase_stable = construct_phase(model)
-    disp_stable = construct_disp(model, BCs.tags, BCs.masks)
+    phase = construct_phase(model)
+    disp = construct_disp(model, bc.tags, bc.masks)
+    ψ = CellState(0.0, dΩ)
 
-    Γ_load = BoundaryTriangulation(model, tags = "load")
+    Γ_load = BoundaryTriangulation(model, tags="load")
     dΓ_load = Measure(Γ_load, degree)
     n_Γ_load = get_normal_vector(Γ_load)
 
-    # Initialise variables, arrays and cell states
     count = 1
     δv = v_init
     v_app = v_init
-    ψ_prev_stable = CellState(0.0, dΩ)
 
     data_frame = DataFrame(Displacement = Float64[0.0], Increment = Float64[v_app],
         Force = Float64[0.0], Energy = Float64[0.0], Damage = Float64[1.0])
 
     # Main loop
     while v_app < v_app_max
-        @info "** Step: $count **" Time = fetch_timer() Increment = @sprintf("%.3e mm", δv) Displacement = @sprintf("%.3e mm", v_app)
+        @info "** Step: $count **" t = fetch_timer() δv = @sprintf("%.3e mm", δv) v = @sprintf("%.3e mm", v_app)
 
-        # Reset all fields to the stable state
-        ψ_prev = ψ_prev_stable
-        phase = phase_stable
-        disp = disp_stable
+        ψ_stable = deepcopy(ψ)
 
         for cycle ∈ 1:max_cycles
-            phase.sh, pf_residual = step_phase_field(dΩ, phase, ψ_prev, tol, false)
-            disp.uh, disp_residual = step_disp_field(dΩ, disp, phase, v_app, tol, false)
+            sh_copy = deepcopy(phase.sh)
+            ϵu = step_disp_field!(dΩ, disp, phase, v_app, nl_tol, false)
+            ϵs = step_phase_field!(dΩ, phase, ψ, nl_tol, false)
+            δs = maximum(abs.(get_free_dof_values(sh_copy) - get_free_dof_values(phase.sh)))
+            update_state!(history_function, ψ, ψ_pos ∘ ε(disp.uh))
 
-            @info "Cycle: $cycle" S_Residual = @sprintf("%.3e", pf_residual) V_Residual = @sprintf("%.3e", disp_residual)
-
-            # Update energy state - max(previous energy, current energy)
-            update_state!(new_energy_state, ψ_prev, ψ_pos ∘ ε(disp.uh))
+            @info "Cycle: $cycle" δs = @sprintf("%.3e", δs) ϵs = @sprintf("%.3e", ϵs) ϵu = @sprintf("%.3e", ϵu)
 
             # Check for convergence
-            if pf_residual < tol && disp_residual < tol
+            if (residual_criteria && ϵs < nl_tol && ϵu < nl_tol) ||
+                (damage_criteria && δs < s_tol)
                 @info "** Step complete **"
                 @printf("\n------------------------------\n\n")
 
                 ψ_sum = sum(∫(ψ_pos ∘ ε(disp.uh)) * dΩ)
                 s_sum = sum(∫(phase.sh) * dΩ)
-                node_force = sum(∫(n_Γ_load ⋅ (σ_mod ∘ (ε(disp.uh), ε(disp.uh), phase.sh))) * dΓ_load)
-
-                # Update log and all stable states
-                push!(data_frame, (v_app, δv, node_force[2], ψ_sum, s_sum))
-                ψ_prev_stable = ψ_prev
-                phase_stable = phase
-                disp_stable = disp
-
-                try
-                    CSV.write(joinpath(save_directory, "log.csv"), data_frame)
-                catch
-                    @error "Error writing to CSV file"
-                end
-
-                if mod(count, 10) == 0 # write every nth iteration
-                    write_solution(Ω, disp, phase, count)
-                end
+                load = sum(∫(n_Γ_load ⋅ (σ_mod ∘ (ε(disp.uh), ε(disp.uh), phase.sh))) *
+                    dΓ_load)[2]
+                push!(data_frame, (v_app, δv, load, ψ_sum, s_sum))
+                write_data(Ω, disp, phase, data_frame, count, 10)
 
                 δv = increment(δv, v_app)
                 v_app += δv
                 count += 1
-                break
-            end
-
-            if cycle != max_cycles
-                continue
+                break # exit cycle
+            elseif cycle != max_cycles
+                continue # continue cycle
             end
 
             δv = δv / 2 # halve increment
             v_app -= δv # remove half increment
+
+            update_state!(restore_energy, ψ_stable)
 
             if δv < δv_min
                 @error "** δv < δv_min - solution failed **"
@@ -457,7 +538,7 @@ function NL_coupled_recursive()
         end
     end
 
-    write_solution(Ω, disp, phase, count)
+    write_data(Ω, disp, phase, data_frame, count, 1)
 end
 
 function NL_coupled_recursive_NCB()
@@ -467,9 +548,9 @@ function NL_coupled_recursive_NCB()
     dΩ = Measure(Ω, degree)
 
     phase = construct_phase(model)
-    disp = construct_disp(model, BCs.tags, BCs.masks)
+    disp = construct_disp(model, bc.tags, bc.masks)
 
-    Γ_load = BoundaryTriangulation(model, tags = "load")
+    Γ_load = BoundaryTriangulation(model, tags="load")
     dΓ_load = Measure(Γ_load, degree)
     n_Γ_load = get_normal_vector(Γ_load)
 
@@ -479,8 +560,8 @@ function NL_coupled_recursive_NCB()
     v_app = v_init
     ψ_prev_stable = CellState(0.0, dΩ)
 
-    data_frame = DataFrame(Displacement = Float64[0.0], Increment = Float64[v_app],
-        Force = Float64[0.0], Energy = Float64[0.0], Damage = Float64[1.0])
+    data_frame = DataFrame(Displacement=Float64[0.0], Increment=Float64[v_app],
+        Force=Float64[0.0], Energy=Float64[0.0], Damage=Float64[1.0])
 
     # Main loop
     while v_app < v_app_max
@@ -548,9 +629,9 @@ function NL_coupled_multi_field()
     dΩ = Measure(Ω, degree)
 
     phase = construct_phase(model)
-    disp = construct_disp(model, BCs.tags, BCs.masks)
+    disp = construct_disp(model, bc.tags, bc.masks)
 
-    Γ_load = BoundaryTriangulation(model, tags = "load")
+    Γ_load = BoundaryTriangulation(model, tags="load")
     dΓ_load = Measure(Γ_load, degree)
     n_Γ_load = get_normal_vector(Γ_load)
 
@@ -560,8 +641,8 @@ function NL_coupled_multi_field()
     v_app = v_init
     ψ_prev = CellState(0.0, dΩ)
 
-    data_frame = DataFrame(Displacement = Float64[0.0], Increment = Float64[v_app],
-        Force = Float64[0.0], Energy = Float64[0.0], Damage = Float64[1.0])
+    data_frame = DataFrame(Displacement=Float64[0.0], Increment=Float64[v_app],
+        Force=Float64[0.0], Energy=Float64[0.0], Damage=Float64[1.0])
 
     # Main loop
     while v_app < v_app_max
@@ -595,14 +676,14 @@ function NL_coupled_multi_field()
             if mod(count, 10) == 0 # write every nth iteration
                 write_solution(Ω, disp, phase, count)
             end
-            
+
             δv = min(δv * growth_rate, δv_max) # increase increment
             v_app += δv # add increment
             count += 1 # update count
         else
             @warn "** Step failed **"
             @printf("\n------------------------------\n\n")
-            
+
             δv = δv / 2 # halve increment
             v_app -= δv # remove half increment
         end
@@ -620,9 +701,9 @@ function NL_coupled_multi_field_parallel(ranks)
         dΩ = Measure(Ω, degree)
 
         phase = construct_phase(model)
-        disp = construct_disp(model, BCs.tags, BCs.masks)
+        disp = construct_disp(model, bc.tags, bc.masks)
 
-        Γ_load = BoundaryTriangulation(model, tags = "load")
+        Γ_load = BoundaryTriangulation(model, tags="load")
         dΓ_load = Measure(Γ_load, degree)
         n_Γ_load = get_normal_vector(Γ_load)
 
@@ -632,8 +713,8 @@ function NL_coupled_multi_field_parallel(ranks)
         v_app = v_init
         ψ_prev = CellState(0.0, dΩ)
 
-        data_frame = DataFrame(Displacement = Float64[0.0], Increment = Float64[v_app],
-        Force = Float64[0.0], Energy = Float64[0.0], Damage = Float64[1.0])
+        data_frame = DataFrame(Displacement=Float64[0.0], Increment=Float64[v_app],
+            Force=Float64[0.0], Energy=Float64[0.0], Damage=Float64[1.0])
 
         # Main loop
         while v_app < v_app_max
@@ -667,14 +748,14 @@ function NL_coupled_multi_field_parallel(ranks)
                 if mod(count, 10) == 0 # write every nth iteration
                     write_solution(Ω, disp, phase, count)
                 end
-                
+
                 δv = min(δv * growth_rate, δv_max) # increase increment
                 v_app += δv # add increment
                 count += 1 # update count
             else
                 @warn "** Step failed **"
                 @printf("\n------------------------------\n\n")
-                
+
                 δv = δv / 2 # halve increment
                 v_app -= δv # remove half increment
             end
@@ -691,9 +772,9 @@ function NL_coupled_multi_field_NCB()
     dΩ = Measure(Ω, degree)
 
     phase = construct_phase(model)
-    disp = construct_disp(model, BCs.tags, BCs.masks)
+    disp = construct_disp(model, bc.tags, bc.masks)
 
-    Γ_load = BoundaryTriangulation(model, tags = "load")
+    Γ_load = BoundaryTriangulation(model, tags="load")
     dΓ_load = Measure(Γ_load, degree)
     n_Γ_load = get_normal_vector(Γ_load)
 
@@ -703,8 +784,8 @@ function NL_coupled_multi_field_NCB()
     v_app = v_init
     ψ_prev = CellState(0.0, dΩ)
 
-    data_frame = DataFrame(Displacement = Float64[0.0], Increment = Float64[v_app],
-        Force = Float64[0.0], Energy = Float64[0.0], Damage = Float64[1.0])
+    data_frame = DataFrame(Displacement=Float64[0.0], Increment=Float64[v_app],
+        Force=Float64[0.0], Energy=Float64[0.0], Damage=Float64[1.0])
 
     # Main loop
     while v_app < v_app_max
@@ -764,22 +845,81 @@ function create_save_directory(filename::String)
 
     # Copy input file to save directory as .txt
     cp(filename,
-        joinpath(save_directory,
-        (splitext(basename(filename))[1] * ".txt")),
-        force = true) # force true to avoid parallel error
+        joinpath(save_directory, basename(filename)), force=true) # force true to avoid parallel error
+    cp(joinpath("..", "pfm-lib.jl"), joinpath(save_directory, "pfm-lib.jl"), force=true)
 
     save_directory
 end
 
-function write_solution(Ω, disp, phase, count)
-    writevtk(Ω, joinpath(save_directory, "solution-iter-$count.vtu"),
-        cellfields = ["uh" => disp.uh, "s" => phase.sh,
-        "epsi" => ε(disp.uh), "sigma" => σ ∘ ε(disp.uh)])
+function write_data(
+    Ω::Gridap.Geometry.BodyFittedTriangulation, disp::DispFieldStruct, phase::PhaseFieldStruct,
+    data_frame::DataFrame, count::Int, step::Int
+)
+    # writevtk(Ω, joinpath(save_directory, "solution-iter-$count.vtu"),
+    #     cellfields=["uh" => disp.uh, "s" => phase.sh,
+    #         "epsi" => ε(disp.uh), "sigma" => σ ∘ ε(disp.uh)])
+
+    try
+        CSV.write(joinpath(save_directory, "log.csv"), data_frame)
+    catch
+        @error "Error writing to CSV file"
+    end
+
+    if mod(count, step) == 0
+        writevtk(Ω, joinpath(save_directory, "solution-iter-$count.vtu"),
+            cellfields=["uh" => disp.uh, "sh" => phase.sh])
+    end
+end
+
+function create_plots()
+    savefile = CSV.File(joinpath(save_directory, "log.csv"))
+    displacement = savefile.Displacement
+    increment = savefile.Increment
+    force = savefile.Force
+    energy = savefile.Energy
+    damage = savefile.Damage
+
+    plt = plot(displacement * 1e3, force,
+        xlabel="Displacement (mm)",
+        ylabel="Force (N)",
+        title="Force vs Displacement",
+        legend=false,
+        grid=true)
+
+    savefig(plt, joinpath(save_directory, "force-displacement.png"))
+
+    plt = plot(displacement * 1e3, increment,
+        xlabel="Displacement (mm)",
+        ylabel="Increment",
+        title="Increment vs Displacement",
+        legend=false,
+        grid=true)
+
+    savefig(plt, joinpath(save_directory, "increment-displacement.png"))
+
+    plt = plot(displacement * 1e3, energy,
+        xlabel="Displacement (mm)",
+        ylabel="Energy",
+        title="Energy vs Displacement",
+        legend=false,
+        grid=true)
+
+    savefig(plt, joinpath(save_directory, "energy-displacement.png"))
+
+    plt = plot(displacement * 1e3, 1 .- damage,
+        xlabel="Displacement (mm)",
+        ylabel="Damage",
+        title="Damage vs Displacement",
+        legend=false,
+        grid=true)
+
+    savefig(plt, joinpath(save_directory, "damage-displacement.png"))
 end
 
 function plot_load_displacement(title::String)
     savefile = CSV.File(joinpath(save_directory, "log.csv"))
-    displacement = savefile.Displacement; load = savefile.Force
+    displacement = savefile.Displacement
+    load = savefile.Force
 
     plt = plot(displacement * 1e3, load,
         xlabel="Displacement (mm)",
@@ -794,7 +934,8 @@ end
 
 function plot_damage_displacement(title::String)
     savefile = CSV.File(joinpath(save_directory, "log.csv"))
-    displacement = savefile.Displacement; damage = savefile.Damage
+    displacement = savefile.Displacement
+    damage = savefile.Damage
 
     plt = plot(displacement * 1e3, 1 .- damage,
         xlabel="Displacement (mm)",
@@ -809,7 +950,8 @@ end
 
 function plot_energy_displacement(title::String)
     savefile = CSV.File(joinpath(save_directory, "log.csv"))
-    displacement = savefile.Displacement; energy = savefile.Energy
+    displacement = savefile.Displacement
+    energy = savefile.Energy
 
     plt = plot(displacement * 1e3, energy,
         xlabel="Displacement (mm)",
@@ -824,7 +966,8 @@ end
 
 function plot_increment_displacement(title::String)
     savefile = CSV.File(joinpath(save_directory, "log.csv"))
-    displacement = savefile.Displacement; increment = savefile.Increment
+    displacement = savefile.Displacement
+    increment = savefile.Increment
 
     plt = plot(displacement * 1e3, increment * 1e3,
         xlabel="Displacement (mm)",
@@ -835,22 +978,4 @@ function plot_increment_displacement(title::String)
 
     savefig(plt, joinpath(save_directory, "incrementDisplacementPlot.png"))
     display(plt)
-end
-
-mutable struct PhaseFieldStruct
-    V0::FESpace
-    U::FESpace
-    sh::FEFunction
-end
-
-mutable struct DispFieldStruct
-    V0::FESpace
-    U::FESpace
-    uh::FEFunction
-end
-
-struct BoundaryConditions
-    tags::Array{String}
-    masks::Array{Tuple{Bool,Bool}}
-    positions::Array{Int}
 end

@@ -12,6 +12,7 @@ import csv
 import numpy as np
 import matplotlib.pyplot as plt
 import os
+import re
 
 
 def material_properties(ts, coors, mode=None, **kwargs):
@@ -56,7 +57,7 @@ def material_properties(ts, coors, mode=None, **kwargs):
         (damage + ETA) * CDEV + CVOL,
     )
 
-    return {"C": c_mod, "psi": pb.psi}
+    return {"C": c_mod, "Psi": pb.psi}
 
 
 def time_step(ts, status, adt, pb, verbose=False):
@@ -118,7 +119,7 @@ def pre_process(pb):
         case "2_4":
             n_quads = 9
         case _:
-            raise ValueError("Unsupported element type.")
+            raise ValueError(f"Unsupported element type: {pb.domain.mesh.descs[0]}")
 
     for region in pb.domain.regions:
         match region.true_kind:
@@ -131,11 +132,8 @@ def pre_process(pb):
             case _:
                 type = ("entity", "entities", 0)
 
-        entities = len(region.entities[type[2]])
-
-        print(
-            f'Region "{region.name}" has {entities} {entities == 1 and type[0] or type[1]}'
-        )
+        ents = len(region.entities[type[2]])
+        print(f'Region "{region.name}" has {ents} {ents == 1 and type[0] or type[1]}')
 
     pb.step = 0.0
     pb.disp = 0.0
@@ -144,15 +142,6 @@ def pre_process(pb):
     pb.psi = np.zeros((pb.domain.mesh.n_el * n_quads, 1, 1))
     pb.log = IndexedStruct(disp=[], force=[], damage=[], damage_avg=[], energy_avg=[])
     pb.history = IndexedStruct
-
-
-# def step_hook(pb, ts, variables):
-#     """
-#     Gets called after each step, right before the post process hook.
-#     """
-#     pass
-#     print("Step hook: updating load boundary condition.")
-#     pb.ebcs[1].dofs["u_disp.1"] = ts.time
 
 
 def nls_iter_hook(pb, nls, vec, it, err, err0):
@@ -248,6 +237,9 @@ def post_process(out, pb, state, extend=False):
     elif force > FEX[0]:
         pb.exit = disp
 
+    if pb.ts.n_step % 10 == 2:
+        purge_savefiles()
+
     return out
 
 
@@ -265,13 +257,34 @@ def post_process_final(problem, state):
     fig.savefig(os.path.join(save_directory, "force_displacement.png"))
 
 
+def purge_savefiles():
+    """
+    Used to save space by removing all but every 10th save file.
+    A better solution would be to only save the 10th save file,
+    however the post_process hook must be called after each step.
+    """
+    mesh_name, _ = os.path.splitext(os.path.basename(filename_mesh))
+    pattern = re.compile(rf"{mesh_name}\.(\d{{5}})\.vtk")
+
+    for filename in os.listdir(save_directory):
+        match = pattern.match(filename)
+        if match:
+            save_number = int(match.group(1))
+            if save_number % 10 != 0:
+                try:
+                    os.remove(os.path.join(save_directory, filename))
+                    print(f"Removed {filename}")
+                except OSError as e:
+                    print(f"Failed to remove {filename}: {e}")
+
+
 # Constants (SI units, with mm as base length unit)
 T0 = 0.0  # Initial time (always 0)
 T1 = 1.0  # Arbitrary final time
 DT = 2.5e-3  # Initial time step -- NOT USED
-TOL = 1e-10  # Tolerance for the nonlinear solver
+TOL = 5e-11  # Tolerance for the nonlinear solver
 TOL2 = 1e-11  # Tolerance for the cutback
-IMAX = 10  # Maximum number of solver iterations
+IMAX = 1000  # Maximum number of solver iterations
 FEX = (1.0, 5e-4)  # Exit force requirement (N) over which displacement (mm)
 DEX = 10e-3  # Exit displacement requirement (mm) - should this be very large for sensitivity study?
 
@@ -283,14 +296,18 @@ CVOL = tensors.get_volumetric_tensor(CMAT)
 
 LS = 0.0075  # Length scale (mm)
 GC = 2.7  # Fracture energy (N/mm)
-ETA = 1e-8
+ETA = 1e-15  # Regularization parameter
 
 ORDER = 2
 DEGREE = 2 * ORDER
 
+LOAD = {"Y": 1.0}
+FIXED = {"Y": 0.0}
+CRACK = {"X": 0.5, "Y1": 0.5 - LS / 5, "Y2": 0.5 + LS / 5}
+
 steps = [
-    [0, 1e-4],
-    [5e-3, 1e-5],
+    [0, 1e-6],
+    [5.3e-3, 1e-7],
 ]
 
 start_time = datetime.now()
@@ -319,7 +336,7 @@ with open(os.path.join(save_directory, "nl-coupled-multi-field.py"), mode="w") a
     file.write(script_content)
 
 options = {
-    "nls": "scipy",
+    "nls": "newton",
     "ls": "ls",
     "output_dir": save_directory,
     "pre_process_hook": "pre_process",
@@ -334,15 +351,16 @@ fields = {
     "damage": ("real", 1, "Omega", ORDER, "H1"),
 }
 
+ics = {
+    "phase": ("Omega", {"damage": 1.0}),
+    "disp": ("Omega", {"displacement": 0.0}),
+}
+
 # N.B. Order: phase-field -> displacement
 variables = {
     "u_disp": ("unknown field", "displacement", 1),
     "v_disp": ("test field", "displacement", "u_disp"),
-    "u_phase": (
-        "unknown field",
-        "damage",
-        0,
-    ),
+    "u_phase": ("unknown field", "damage", 0),
     "v_phase": ("test field", "damage", "u_phase"),
 }
 
@@ -351,16 +369,16 @@ integrals = {
 }
 
 equations = {
-    "eq_disp": """dw_lin_elastic.i.Omega(mat.C, v_disp, u_disp) = 0""",
-    "eq_phase": """dw_laplace.i.Omega(const.GCLS, v_phase, u_phase) +
-        dw_dot.i.Omega(mat.psi, v_phase, u_phase) +
-        dw_dot.i.Omega(const.GC_LS, v_phase, u_phase) =
-        dw_integrate.i.Omega(const.GC_LS, v_phase)""",
+    "disp": """dw_lin_elastic.i.Omega(mat.C, v_disp, u_disp)""",
+    "phase": """dw_laplace.i.Omega(const.Gcls, v_phase, u_phase)
+        + dw_dot.i.Omega(mat.Psi, v_phase, u_phase)
+        + dw_dot.i.Omega(const.Gc_ls, v_phase, u_phase)
+        - dw_integrate.i.Omega(const.Gc_ls, v_phase)""",
 }
 
 materials = {
     "mat": "material",
-    "const": ({"C": CMAT, "GCLS": GC * LS, "GC_LS": GC / LS},),
+    "const": ({"C": CMAT, "Gcls": GC * LS, "Gc_ls": GC / LS},),
 }
 
 functions = {
@@ -369,23 +387,20 @@ functions = {
 
 regions = {
     "Omega": "all",
-    "Load": (
-        "vertices in (y > 0.99)",
-        "facet",
-    ),
-    "Fixed": (
-        "vertices in (y < 0.01)",
-        "facet",
-    ),
+    "Load": ("vertices in (y == %f)" % LOAD["Y"], "facet"),
+    "Fixed": ("vertices in (y == %f)" % FIXED["Y"], "facet"),
     "Crack": (
-        "vertices in (x < 0.5) & (y < %f) & (y > %f)" % (0.5 + LS / 5, 0.5 - LS / 5),
+        "vertices in (x <= %f) & (y >= %f) & (y <= %f)"
+        % (CRACK["X"], CRACK["Y1"], CRACK["Y2"]),
         "cell",
     ),
 }
 
-ics = {
-    "phase": ("Omega", {"damage": 1.0}),
-    "disp": ("Omega", {"displacement": 0.0}),
+regions = {
+    "Omega": "all",
+    "Load": ("vertices in (y == 1.0)", "facet"),
+    "Fixed": ("vertices in (y == 0.0)", "facet"),
+    "Crack": ("vertices in (x <= 0.5) & (y >= 0.4985) & (y <= 0.5015)", "cell"),
 }
 
 ebcs = {

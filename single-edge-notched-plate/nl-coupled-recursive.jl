@@ -17,40 +17,31 @@ include(joinpath("..", "pfm-lib.jl"))
 ## Constants
 const E = 210e3
 const ν = 0.3
-const C = elas_fourth_order_const_tensor(E, ν, "PlaneStrain")
-const I4_vol, I4_dev = volumetric_deviatoric_projection()
-
-const ls = 0.0075
+const ℂ = stiffness_tensor(E, ν, "PlaneStrain")
+const Iᵛᵒˡ, Iᵈᵉᵛ = vol_dev()
+const ls = 0.0075 # 0.0075 - 0.015 - 0.03
 const Gc = 2.7
 const η = 1e-15
-
-const max_cycles = 100
-const nl_tol = 1e-6
-const s_tol = 1e-3
+const nl_tol = 1e-5
+const nl_iter = 5
+const verbose = false
 
 ## Displacement Parameters
-const v_init = 2.5e-3
-const v_app_max = 6.5e-3
-const v_app_threshold = 5e-3
-
-## Displacement Adaptive Stepping
-const δv_min = 1e-7
-const δv_coarse_max = 1e-4
-const δv_refine_max = 1e-5
-const growth_rate = 1.2
-const damage_criteria = false
-const residual_criteria = true
+const v_app_max = 6e-3
+const linear_region = 5e-3
+const δv_coarse = 1e-4
+const δv_fine = 15e-5
 
 ## Model Setup
-mesh_file = joinpath(@__DIR__, "meshes", "notchedPlateRahaman.msh")
-save_directory = create_save_directory(@__FILE__)
-bc = BoundaryConditions(["load", "fixed"], [(false, true), (true, true)], [2])
+const mesh_file = joinpath(@__DIR__, "meshes", "notchedPlateRahaman.msh")
+const save_directory = create_save_directory(@__FILE__)
+const bc = BoundaryConditions(["load", "fixed"], [(false, true), (true, true)])
 const order = 2
 const degree = 2 * order
 
 ## Run
 tick()
-nl_coupled_recursive()
+non_linear_alternate_minimisation()
 tock()
 
 create_plots()

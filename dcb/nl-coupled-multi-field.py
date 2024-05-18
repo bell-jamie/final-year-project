@@ -12,6 +12,7 @@ import csv
 import numpy as np
 import matplotlib.pyplot as plt
 import os
+import re
 
 
 def material_properties(ts, coors, mode=None, **kwargs):
@@ -26,23 +27,19 @@ def material_properties(ts, coors, mode=None, **kwargs):
     ev = pb.evaluate
     dims = pb.psi.shape
 
-    # On the first step, use the quad point coords to assign the fracture toughness
-    if ts.n_step == 1:
-        map_gc(pb.gc, coors)
-
     # Evaluate and damage
     strain = ev("ev_cauchy_strain.i.Omega(u_disp)", mode=mode).reshape(-1, 3, 1)
     damage = ev("ev_integrate.i.Omega(u_phase)", mode=mode).reshape(-1, 1, 1)
 
-    # Trace and trace mask for tensile or compressive
+    # Trace and trace mask for tension or compressive
     trace = strain[:, 0, 0] + strain[:, 1, 0]
     trace_mask = trace >= 0
 
     # Deviatoric strain calculation
     strain_dev = strain.copy()
-    strain_dev[:, :2, 0] -= trace[:, None] / 2
+    strain_dev[:, :2, 0] -= trace[:, np.newaxis] / 2
 
-    # Elastic strain energy for damage
+    # Elastic strain energy
     pb.psi = np.maximum(
         pb.psi,
         np.where(
@@ -52,7 +49,7 @@ def material_properties(ts, coors, mode=None, **kwargs):
         ).reshape(dims),
     )
 
-    # Linear elastic stiffness tensor
+    # Modified elastic stiffness tensor
     damage **= 2
     c_mod = np.where(
         trace_mask.reshape(dims),
@@ -60,14 +57,18 @@ def material_properties(ts, coors, mode=None, **kwargs):
         (damage + ETA) * CDEV + CVOL,
     )
 
-    return {"C": c_mod, "psi": pb.psi, "GCLS": pb.gc * LS, "GC_LS": pb.gc / LS}
+    # On the first step, use the quad point coords to assign the fracture toughness
+    if ts.n_step == 1:
+        map_gc(pb.gc, coors)
+
+    return {"C": c_mod, "Psi": pb.psi, "Gcls": pb.gc * LS, "Gc_ls": pb.gc / LS}
 
 
 def map_gc(gc, coors):
     n_int = 0
 
     for i, coor in enumerate(coors):
-        if coor[1] >= LBEAM["Y2"] and coor[1] <= UBEAM["Y1"]:
+        if coor[1] >= LOAD["YA"] and coor[1] <= LOAD["YB"]:
             gc[i] = GC_I
             n_int += 1
 
@@ -96,7 +97,7 @@ def pre_process(pb):
         case "2_4":
             n_quads = 9
         case _:
-            raise ValueError("Unsupported element type.")
+            raise ValueError(f"Unsupported element type: {pb.domain.mesh.descs[0]}")
 
     for region in pb.domain.regions:
         match region.true_kind:
@@ -109,13 +110,8 @@ def pre_process(pb):
             case _:
                 type = ("entity", "entities", 0)
 
-        entities = len(region.entities[type[2]])
-
-        print(
-            f'Region "{region.name}" has {entities} {entities == 1 and type[0] or type[1]}'
-        )
-
-    # exit()
+        ents = len(region.entities[type[2]])
+        print(f'Region "{region.name}" has {ents} {ents == 1 and type[0] or type[1]}')
 
     pb.step = STEP_MIN
     pb.disp = 0.0
@@ -142,7 +138,7 @@ def post_process(out, pb, state, extend=False):
     """
     print("Post process hook: calculating stress, damage and load force.")
 
-    disp = pb.ebcs["load"].dofs["u_disp.1"]
+    disp = pb.ebcs["load_a"].dofs["u_disp.1"] * 2
     cells = pb.domain.mesh.n_el
     ev = pb.evaluate
 
@@ -196,7 +192,8 @@ def post_process(out, pb, state, extend=False):
     # Apply displacement step
     pb.step = steps.pop(0)[1] if steps and disp >= steps[0][0] else pb.step
     pb.ts.time = pb.disp = disp + pb.step
-    pb.ebcs["load"].dofs["u_disp.1"] = pb.disp
+    pb.ebcs["load_a"].dofs["u_disp.1"] = pb.disp / 2
+    pb.ebcs["load_b"].dofs["u_disp.1"] = -pb.disp / 2
 
     # Von mises stress
     # stress = ev("ev_cauchy_stress.i.Omega(const.C, u_disp)", mode="el_avg")
@@ -209,8 +206,8 @@ def post_process(out, pb, state, extend=False):
     energy_avg = 0.5 * np.einsum("ijk->", pb.psi) / cells
 
     # Force - [[xx], ->[yy]<-, [2xy]
-    force = ev("ev_cauchy_stress.i.Fixed(mat.C, u_disp)", mode="eval")[1]
-    force /= LBEAM["Y2"] - LBEAM["Y1"]  # N = Pa / m
+    force = ev("ev_cauchy_stress.i.LoadA(mat.C, u_disp)", mode="eval")[1]
+    force /= 1e-3  # FIXED["Y"]  # N = Pa / m
 
     # Write to log
     with open(os.path.join(save_directory, "log.csv"), mode="a", newline="") as file:
@@ -241,6 +238,9 @@ def post_process(out, pb, state, extend=False):
         print("Displacement exit criteria met.")
         pb.ts.time = T1
 
+    if pb.ts.n_step % 10 == 2:
+        purge_savefiles()
+
     return out
 
 
@@ -258,12 +258,33 @@ def post_process_final(problem, state):
     fig.savefig(os.path.join(save_directory, "force_displacement.png"))
 
 
+def purge_savefiles():
+    """
+    Used to save space by removing all but every 10th save file.
+    A better solution would be to only save the 10th save file,
+    however the post_process hook must be called after each step.
+    """
+    mesh_name, _ = os.path.splitext(os.path.basename(filename_mesh))
+    pattern = re.compile(rf"{mesh_name}\.(\d{{5}})\.vtk")
+
+    for filename in os.listdir(save_directory):
+        match = pattern.match(filename)
+        if match:
+            save_number = int(match.group(1))
+            if save_number % 10 != 0:
+                try:
+                    os.remove(os.path.join(save_directory, filename))
+                    print(f"Removed {filename}")
+                except OSError as e:
+                    print(f"Failed to remove {filename}: {e}")
+
+
 # Constants (SI units)
 T0 = 0.0  # Initial time (always 0)
 T1 = 1.0  # Arbitrary final time
 DT = 2.5e-3  # Initial time step -- NOT USED
-TOL = 1.5e-5  # Tolerance for the nonlinear solver
-IMAX = 10  # Maximum number of solver iterations
+TOL = 5e-5  # Tolerance for the nonlinear solver
+IMAX = 50  # Maximum number of solver iterations
 DEX = 4e-3  # Exit displacement requirement (m)
 D_TOL = 5e-10  # Damage tolerance
 STEP_GROWTH = 1.1  # Step growth factor
@@ -280,26 +301,33 @@ CVOL = tensors.get_volumetric_tensor(CMAT)
 LS = 0.03e-3  # Length scale (m)
 GC_I = 281  # Interface fracture energy (N/m)
 GC_B = GC_I * 10  # Beam fracture energy (N/m)
-ETA = 1e-8
+ETA = 1e-15  # Regularization parameter
 
 ORDER = 2
 DEGREE = 2 * ORDER
 
-# Dimensions for regions - X1 < X2 & Y1 < Y2 always
-WIDTH = 100e-3
-CRK = {"X1": 70e-3, "X2": WIDTH, "Y1": 2.69e-3, "Y2": 2.73e-3}
-LBEAM = {"X1": 0.0, "X2": WIDTH, "Y1": 0.0, "Y2": 2.66e-3}
-UBEAM = {"X1": 0.0, "X2": WIDTH, "Y1": 2.76e-3, "Y2": 4.09e-3}
+LOAD = {"X": 50e-3, "YA": 1.1e-3, "YB": 1.0e-3}
+FIXED = {"X": 50e-3, "Y": 1.0e-3}
+CRACK = {"X": 35e-3, "Y1": 1.05e-3 - LS / 2, "Y2": 1.05e-3 + LS / 2}
+
+# LOAD = {"X": 100e-3, "Y": 2.76e-3}
+# FIXED = {"X": 100e-3, "Y": 2.66e-3}
+# CRACK = {"X": 70e-3, "Y1": 2.71e-3 - LS / 5, "Y2": 2.71e-3 + LS / 5}
 
 steps = [
     [0, 1e-6],
-    [2e-3, 1e-7],
+    [7e-4, 5e-7],
 ]
+
+# steps = [
+#     [0, 1e-6],
+#     [8e-4, 1e-7],
+# ]
 
 start_time = datetime.now()
 start_time_string = start_time.strftime("%Y-%m-%d_%H-%M-%S")
 script_directory = os.path.dirname(__file__)
-filename_mesh = os.path.join(script_directory, "meshes", "dcb.vtk")
+filename_mesh = os.path.join(script_directory, "meshes", "sym-dcb.vtk")
 save_directory = os.path.join(
     script_directory,
     "files",
@@ -338,15 +366,15 @@ fields = {
     "damage": ("real", 1, "Omega", ORDER, "H1"),
 }
 
-# N.B. Order: phase-field -> displacement
+ics = {
+    "phase": ("Omega", {"damage": 1.0}),
+    "disp": ("Omega", {"displacement": 0.0}),
+}
+
 variables = {
-    "u_disp": ("unknown field", "displacement", 1),
+    "u_disp": ("unknown field", "displacement", 0),
     "v_disp": ("test field", "displacement", "u_disp"),
-    "u_phase": (
-        "unknown field",
-        "damage",
-        0,
-    ),
+    "u_phase": ("unknown field", "damage", 1),
     "v_phase": ("test field", "damage", "u_phase"),
 }
 
@@ -355,11 +383,11 @@ integrals = {
 }
 
 equations = {
-    "eq_disp": """dw_lin_elastic.i.Omega(mat.C, v_disp, u_disp) = 0""",
-    "eq_phase": """dw_laplace.i.Omega(mat.GCLS, v_phase, u_phase) +
-        dw_dot.i.Omega(mat.psi, v_phase, u_phase) +
-        dw_dot.i.Omega(mat.GC_LS, v_phase, u_phase) =
-        dw_integrate.i.Omega(mat.GC_LS, v_phase)""",
+    "disp": """dw_lin_elastic.i.Omega(mat.C, v_disp, u_disp)""",
+    "phase": """dw_laplace.i.Omega(mat.Gcls, v_phase, u_phase)
+        + dw_dot.i.Omega(mat.Psi, v_phase, u_phase)
+        + dw_dot.i.Omega(mat.Gc_ls, v_phase, u_phase)
+        - dw_integrate.i.Omega(mat.Gc_ls, v_phase)""",
 }
 
 materials = {
@@ -373,30 +401,26 @@ functions = {
 
 regions = {
     "Omega": "all",
-    "Load": (
-        "vertices in (x == %f) & (y >= %f)" % (UBEAM["X2"], UBEAM["Y1"]),
-        "facet",
-    ),
-    # "LoadPoint": (
-    #     "vertices in (x == %f) & (y >= %f)"  # & (y <= %f)"
-    #     % (
-    #         UBEAM["X2"],
-    #         UBEAM["Y2"],
-    #         # UBEAM["Y1"] + 0.5e-3,
-    #         # UBEAM["Y2"] - 0.5e-3,
-    #     ),
-    #     "vertex",
-    # ),
-    "Fixed": (
-        "vertices in (x == %f) & (y <= %f)" % (LBEAM["X2"], LBEAM["Y2"]),
-        "facet",
-    ),
+    "LoadA": ("vertices in (x == %f) & (y >= %f)" % (LOAD["X"], LOAD["YA"]), "facet"),
+    "LoadB": ("vertices in (x == %f) & (y <= %f)" % (LOAD["X"], LOAD["YB"]), "facet"),
+    "Fixed": ("vertices in (x == 0.0)", "facet"),
     "Crack": (
         "vertices in (x >= %f) & (y >= %f) & (y <= %f)"
-        % (CRK["X1"], CRK["Y1"], CRK["Y2"]),
+        % (CRACK["X"], CRACK["Y1"], CRACK["Y2"]),
         "cell",
     ),
 }
+
+# regions = {
+#     "Omega": "all",
+#     "Load": ("vertices in (x == %f) & (y >= %f)" % (LOAD["X"], LOAD["Y"]), "facet"),
+#     "Fixed": ("vertices in (x == %f) & (y <= %f)" % (FIXED["X"], FIXED["Y"]), "facet"),
+#     "Crack": (
+#         "vertices in (x >= %f) & (y >= %f) & (y <= %f)"
+#         % (CRACK["X"], CRACK["Y1"], CRACK["Y2"]),
+#         "cell",
+#     ),
+# }
 
 ics = {
     "phase": ("Omega", {"damage": 1.0}),
@@ -405,11 +429,16 @@ ics = {
 
 ebcs = {
     "fixed": ("Fixed", {"u_disp.all": 0.0}),
-    "load": ("Load", {"u_disp.1": 0.0}),
+    "load_a": ("LoadA", {"u_disp.1": 0.0}),
+    "load_b": ("LoadB", {"u_disp.1": 0.0}),
     "crack": ("Crack", {"u_phase.all": 0.0}),
 }
 
-lcbs = {"load_rigid": ("Load", {"u_disp.all", None}, None, "rigid")}
+lcbs = {
+    "load_a_rigid": ("LoadA", {"u_disp.all", None}, None, "rigid"),
+    "load_b_rigid": ("LoadB", {"u_disp.all", None}, None, "rigid"),
+    # "fixed_rigid": ("Fixed", {"u_disp.all", None}, None, "rigid"),
+}
 
 solvers = {
     "ls": ("ls.scipy_direct", {}),

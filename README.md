@@ -18,7 +18,7 @@ This implementation is used to solve the single edge notched plate tension bench
 	- Internal minimisation cycles solve each field independently
 - **Non-Linear Monolithic**
 	- Requires small step sizes to converge due to the non-convex nature of the coupled functional
-- Functions Library
+- **Functions Library**
 	- pfm-lib.jl is a centralised collection of the solvers and loops to avoid code repetition
 	- This file is imported by the problem scripts for access to the custom phase and displacement structs and all of the helper functions
 

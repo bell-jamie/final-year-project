@@ -55,7 +55,7 @@ def material_properties(ts, coors, mode=None, **kwargs):
         map_gc(coors, pb.gc)
         pb.gc_set = True
 
-    return {"C": c_mod, "Psi": pb.psi, "Gcls": pb.gc * LS, "Gc_ls": pb.gc / LS}
+    return {"C": c_mod, "Psi": psi, "Gcls": pb.gc * LS, "Gc_ls": pb.gc / LS}
 
 
 def map_gc(coors, gc):
@@ -145,8 +145,7 @@ def post_process_hook(out, pb, state, extend=False):
     energy_avg = 0.5 * np.einsum("ijk->", pb.psi) / cells
 
     # Force - [[xx], ->[yy]<-, [2xy]] - N = Pa * m^2
-    force = abs(ev("ev_cauchy_stress.i.LoadA(mat.C, u_disp)", mode="eval")[1])
-    force *= 2 * LOAD["YB"] * 1e6  # two symmetric arms and m^2 -> mm^2
+    force = abs(ev("ev_cauchy_stress.i.LoadA(mat.C, u_disp)", mode="eval")[1]) * 1000
 
     # Write to log
     with open(os.path.join(save_directory, "log.csv"), mode="a", newline="") as file:
@@ -187,11 +186,11 @@ def post_process_final_hook(problem, state):
         reader = csv.reader(file)
         data = list(reader)
 
-    disp = [float(row[0]) for row in data[1:]]
+    disp = [float(row[0]) * 1000 for row in data[1:]]
     force = [float(row[1]) for row in data[1:]]
 
     fig, ax = plt.subplots()
-    ax.plot(disp * 1000, force)
+    ax.plot(disp, force)
     ax.set_xlabel("Displacement [mm]")
     ax.set_ylabel("Force [N]")
     ax.grid(True)
@@ -225,9 +224,9 @@ def purge_savefiles():
 T0 = 0.0  # Initial time (always 0)
 T1 = 1.0  # Arbitrary final time
 DT = 1.0  # Initial time step -- NOT USED
-TOL = 2.5e-5  # Tolerance for the nonlinear solver
+TOL = 1.5e-5  # Tolerance for the nonlinear solver
 IMAX = 20  # Maximum number of solver iterations
-DEX = 2e-3  # Exit displacement requirement (m)
+DEX = 0.35e-3  # Exit displacement requirement (m)
 
 E = 126e9  # Young's modulus (Pa)
 NU = 0.3  # Poisson's ratio
@@ -250,7 +249,8 @@ FIXED = {"X": 50e-3}
 CRACK = {"X": 40e-3, "Y1": 1.55e-3 - LS / 2, "Y2": 1.55e-3 + LS / 2}
 
 steps = [
-    [0, 1e-8],
+    [0.15e-3, 1e-6],
+    [0, 5e-8],
 ]
 
 start_time = datetime.now()

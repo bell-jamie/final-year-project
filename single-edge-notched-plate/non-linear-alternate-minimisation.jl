@@ -31,7 +31,7 @@ const verbose = false
 const v_app_max = 6e-3
 const linear_region = 5e-3
 const δv_coarse = 1e-4
-const δv_fine = 15e-5
+const δv_fine = 1e-5
 
 ## Model Setup
 const mesh_file = joinpath(@__DIR__, "meshes", "senp-geometric-crack.msh")

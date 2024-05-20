@@ -24,14 +24,14 @@ const ls = 0.0075
 const Gc = 2.7
 const η = 1e-15
 const nl_tol = 1e-5
-const nl_iter = 1000
+const nl_iter = 5
 const verbose = true
 
 ## Displacement Parameters
 const v_app_max = 6e-3
 const linear_region = 5.3e-3
 const δv_coarse = 1e-4
-const δv_fine = 1e-6
+const δv_fine = 5e-7
 
 ## Model Setup
 const mesh_file = joinpath(@__DIR__, "meshes", "senp-geometric-crack.msh")

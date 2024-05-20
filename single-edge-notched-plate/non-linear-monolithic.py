@@ -171,12 +171,12 @@ def post_process_final_hook(problem, state):
         reader = csv.reader(file)
         data = list(reader)
 
-    disp = [float(row[0]) for row in data[1:]]
+    disp = [float(row[0]) * 1000 for row in data[1:]]
     force = [float(row[1]) for row in data[1:]]
 
     fig, ax = plt.subplots()
     ax.plot(disp, force)
-    ax.set_xlabel("Displacement [mm]")
+    ax.set_xlabel("Displacement [μm]")
     ax.set_ylabel("Force [N]")
     ax.grid(True)
 
@@ -212,7 +212,7 @@ DT = 1.0  # Initial time step -- NOT USED
 TOL = 5e-11  # Tolerance for the nonlinear solver
 IMAX = 1000  # Maximum number of solver iterations
 FEX = (1.0, 5e-4)  # Exit force requirement (N) over which displacement (mm)
-DEX = 10e-3  # Exit displacement requirement (mm) - should this be very large for sensitivity study?
+DEX = 10e-3  # Exit displacement requirement (mm)
 
 E = 210e3  # Young's modulus (MPa)
 NU = 0.3  # Poisson's ratio

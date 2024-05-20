@@ -9,6 +9,7 @@ using Plots
 using TickTock
 using CSV
 using DataFrames
+using LineSearches: BackTracking
 using Dates
 
 include(joinpath("..", "pfm-lib.jl"))
@@ -16,25 +17,26 @@ include(joinpath("..", "pfm-lib.jl"))
 ## Constants
 const E = 210e3
 const ν = 0.3
-const C = elas_fourth_order_const_tensor(E, ν, "PlaneStrain")
-const I4_vol, I4_dev = volumetric_deviatoric_projection()
-
+const ℂ = stiffness_tensor(E, ν, "PlaneStrain")
+const Iᵛᵒˡ, Iᵈᵉᵛ = vol_dev()
 const ls = 0.0075
 const Gc = 2.7
 const η = 1e-15
-
-const max_cycles = 10
 const tol = 1e-8
-const δv_refined = 1e-5
-const δv_coarse = 1e-4
-const v_app_threshold = 5e-3
+const max_cycles = 10
+const verbose = false
+
+## Displacement Parameters
 const v_app_max = 7e-3
+const linear_region = 5e-3
+const δv_coarse = 1e-4
+const δv_fine = 1e-5
 
 ## Model Setup
-mesh_file = joinpath(@__DIR__, "meshes", "notchedPlateRahaman.msh")
-save_directory = create_save_directory(@__FILE__)
-BCs = BoundaryConditions(["load", "fixed"], [(false, true), (true, true)], [2])
-const order = 1 # Rahaman used linear discretisation
+const mesh_file = joinpath(@__DIR__, "meshes", "senp-geometric-crack.msh")
+const save_directory = create_save_directory(@__FILE__)
+const bc = BoundaryConditions(["Load", "Fixed"], [(false, true), (true, true)])
+const order = 2
 const degree = 2 * order
 
 ## Run
@@ -42,8 +44,4 @@ tick()
 linear_segregated()
 tock()
 
-## Plot
-plot_load_displacement("Single Edge Notched Plate - Linear Segregated")
-plot_damage_displacement("Single Edge Notched Plate - Linear Segregated")
-plot_increment_displacement("Single Edge Notched Plate - Linear Segregated")
-plot_energy_displacement("Single Edge Notched Plate - Linear Segregated")
+create_plots()

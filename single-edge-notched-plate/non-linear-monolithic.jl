@@ -34,9 +34,9 @@ const δv_coarse = 1e-4
 const δv_fine = 1e-6
 
 ## Model Setup
-const mesh_file = joinpath(@__DIR__, "meshes", "notchedPlateRahaman.msh")
+const mesh_file = joinpath(@__DIR__, "meshes", "senp-geometric-crack.msh")
 const save_directory = create_save_directory(@__FILE__)
-const bc = BoundaryConditions(["load", "fixed"], [(false, true), (true, true)])
+const bc = BoundaryConditions(["Load", "Fixed"], [(false, true), (true, true)])
 const order = 2
 const degree = 2 * order
 

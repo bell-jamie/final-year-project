@@ -1,12 +1,6 @@
 from __future__ import absolute_import
 from datetime import datetime
-from sfepy.discrete.problem import IndexedStruct
 from sfepy.mechanics import matcoefs, tensors
-from sfepy.discrete.fem import Mesh
-from sfepy.discrete.conditions import EssentialBC, Conditions
-from sfepy.discrete import Problem, problem
-from sfepy.base.base import Struct
-from sfepy.mechanics.tensors import get_von_mises_stress
 
 import csv
 import numpy as np
@@ -52,9 +46,30 @@ def material_properties(ts, coors, mode=None, **kwargs):
         (damage + ETA) * CDEV + CVOL,
     )
 
-    pb.ebcs["load"].dofs["u_disp.1"] = pb.disp
+    # Apply bc after elastic energy calculation
+    pb.ebcs["load_a"].dofs["u_disp.1"] = pb.disp / 2
+    pb.ebcs["load_b"].dofs["u_disp.1"] = -pb.disp / 2
 
-    return {"C": c_mod, "Psi": psi}
+    # On the first step, use the quad point coordinates to map the interface toughness
+    if pb.gc_set is False:
+        map_gc(coors, pb.gc)
+        pb.gc_set = True
+
+    return {"C": c_mod, "Psi": pb.psi, "Gcls": pb.gc * LS, "Gc_ls": pb.gc / LS}
+
+
+def map_gc(coors, gc):
+    """
+    Maps the interface fracture toughness to the interface elements.
+    """
+    n_int = 0
+    for i, coor in enumerate(coors):
+        if coor[1] <= LOAD["YA"] and coor[1] >= LOAD["YB"]:
+            gc[i] = GC_I
+            n_int += 1
+
+    print(f"Number of quads with interface fracture toughness: {n_int}")
+    print(f"Number of quads with bulk fracture toughness: {len(gc) - n_int}")
 
 
 def time_step(ts, status, adt, pb, verbose=False):
@@ -80,6 +95,12 @@ def pre_process_hook(pb):
         case _:
             raise ValueError(f"Unsupported element type: {pb.domain.mesh.descs[0]}")
 
+    pb.step = steps[0][1]
+    pb.disp = 0.0
+    pb.psi = np.zeros((pb.domain.mesh.n_el * n_quads, 1, 1))
+    pb.gc = np.full((pb.domain.mesh.n_el * n_quads, 1, 1), GC_B)
+    pb.gc_set = False
+
     for region in pb.domain.regions:
         match region.true_kind:
             case "vertex":
@@ -93,12 +114,6 @@ def pre_process_hook(pb):
 
         ents = len(region.entities[type[2]])
         print(f'Region "{region.name}" has {ents} {ents == 1 and type[0] or type[1]}')
-
-    pb.step = steps[0][1]
-    pb.disp = 0.0
-    pb.exit = 0
-    pb.cutbacks = 0
-    pb.psi = np.zeros((pb.domain.mesh.n_el * n_quads, 1, 1))
 
 
 def nls_iter_hook(pb, nls, vec, it, err, err0):
@@ -115,7 +130,6 @@ def post_process_hook(out, pb, state, extend=False):
     """
     print("Post process hook: calculating stress, damage and load force.")
 
-    disp = pb.ebcs[1].dofs["u_disp.1"]
     cells = pb.domain.mesh.n_el
     ev = pb.evaluate
 
@@ -130,43 +144,36 @@ def post_process_hook(out, pb, state, extend=False):
     damage_avg = 1 - np.einsum("ijkl->", damage) / cells
     energy_avg = 0.5 * np.einsum("ijk->", pb.psi) / cells
 
-    # Force - [[xx], ->[yy]<-, [2xy]]
-    force = ev("ev_cauchy_stress.i.Fixed(mat.C, u_disp)", mode="eval")[1]
+    # Force - [[xx], ->[yy]<-, [2xy]] - N = Pa * m^2
+    force = abs(ev("ev_cauchy_stress.i.LoadA(mat.C, u_disp)", mode="eval")[1])
+    force *= 2 * LOAD["YB"] * 1e6  # two symmetric arms and m^2 -> mm^2
 
     # Write to log
     with open(os.path.join(save_directory, "log.csv"), mode="a", newline="") as file:
         writer = csv.writer(file)
-        writer.writerow([disp, force, damage_avg, energy_avg])
+        writer.writerow([pb.disp, force, damage_avg, energy_avg])
 
     # Display stats
     print(f"\n############### STATS ###############")
     print(f"Step: {pb.ts.n_step}")
     print(f"Time: {datetime.now() - start_time}")
-    print(f"Displacement: {1000 * disp} mm")
+    print(f"Displacement: {1000 * pb.disp} mm")
     print(f"Step size: {pb.step}")
-    print(f"Cutbacks: {pb.cutbacks}")
     print(f"Force: {force} N")
     print(f"Damage: {damage_new}")
-    print(f"Damage avg: {damage_avg}")
-    print(f"Energy avg: {energy_avg}")
     print(f"#####################################\n")
 
     # Calculate next displacement step
-    pb.step = pb.step, steps.pop(0)[1] if steps and disp >= steps[0][0] else pb.step
-    pb.ts.time = pb.disp = disp + pb.step
+    pb.step = steps.pop(0)[1] if steps and pb.disp >= steps[0][0] else pb.step
+    pb.disp += pb.step
+    pb.ts.time = pb.disp
 
     # Exit criteria
-    if disp >= DEX:
+    if pb.disp >= DEX:
         print("Displacement exit criteria met.")
         pb.ts.time = T1
 
-    if force < FEX[0] and pb.exit + FEX[1] < disp:
-        print("Force exit criteria met.")
-        pb.ts.time = T1
-    elif force > FEX[0]:
-        pb.exit = disp
-
-    if pb.ts.n_step % 10 == 2:
+    if pb.ts.n_step % 20 == 2:
         purge_savefiles()
 
     return out
@@ -184,7 +191,7 @@ def post_process_final_hook(problem, state):
     force = [float(row[1]) for row in data[1:]]
 
     fig, ax = plt.subplots()
-    ax.plot(disp, force)
+    ax.plot(disp * 1000, force)
     ax.set_xlabel("Displacement [mm]")
     ax.set_ylabel("Force [N]")
     ax.grid(True)
@@ -206,7 +213,7 @@ def purge_savefiles():
         match = pattern.match(filename)
         if match:
             save_number = int(match.group(1))
-            if save_number % 10 != 0:
+            if save_number % 50 != 0:
                 try:
                     os.remove(os.path.join(save_directory, filename))
                     print(f"Removed {filename}")
@@ -214,37 +221,36 @@ def purge_savefiles():
                     print(f"Failed to remove {filename}: {e}")
 
 
-# Constants (SI units, with mm as base length unit)
+# Constants (SI units)
 T0 = 0.0  # Initial time (always 0)
 T1 = 1.0  # Arbitrary final time
-DT = 2.5e-3  # Initial time step -- NOT USED
-TOL = 5e-11  # Tolerance for the nonlinear solver
-IMAX = 1000  # Maximum number of solver iterations
-FEX = (1.0, 5e-4)  # Exit force requirement (N) over which displacement (mm)
-DEX = 10e-3  # Exit displacement requirement (mm) - should this be very large for sensitivity study?
+DT = 1.0  # Initial time step -- NOT USED
+TOL = 2.5e-5  # Tolerance for the nonlinear solver
+IMAX = 20  # Maximum number of solver iterations
+DEX = 2e-3  # Exit displacement requirement (m)
 
-E = 210e3  # Young's modulus (MPa)
+E = 126e9  # Young's modulus (Pa)
 NU = 0.3  # Poisson's ratio
 CMAT = matcoefs.stiffness_from_youngpoisson(dim=2, young=E, poisson=NU, plane="strain")
 CDEV = tensors.get_deviator(CMAT)
 CVOL = tensors.get_volumetric_tensor(CMAT)
 
-LS = 0.0075  # Length scale (mm)
-GC = 2.7  # Fracture energy (N/mm)
+LS = 30e-6  # Length scale (m)
+GC_I = 187  # 281  # Interface fracture energy (N/m)
+GC_B = 281 * 10  # Beam fracture energy (N/m)
 ETA = 1e-15  # Regularization parameter
 
 ORDER = 2
 DEGREE = 2 * ORDER
 
-MESH = "notchedPlateTriNoCrack.vtk"
+MESH = "sym-dcb.vtk"
 
-LOAD = {"Y": 1.0}
-FIXED = {"Y": 0.0}
-CRACK = {"X": 0.5, "Y1": 0.5 - LS / 5, "Y2": 0.5 + LS / 5}
+LOAD = {"X": 50e-3, "YA": 1.6e-3, "YB": 1.5e-3}
+FIXED = {"X": 50e-3}
+CRACK = {"X": 40e-3, "Y1": 1.55e-3 - LS / 2, "Y2": 1.55e-3 + LS / 2}
 
 steps = [
-    [0, 1e-5],
-    [5.3e-3, 1e-6],
+    [0, 1e-8],
 ]
 
 start_time = datetime.now()
@@ -293,11 +299,10 @@ ics = {
     "disp": ("Omega", {"displacement": 0.0}),
 }
 
-# N.B. Order: phase-field -> displacement
 variables = {
-    "u_disp": ("unknown field", "displacement", 0, 1),
+    "u_disp": ("unknown field", "displacement", 0),
     "v_disp": ("test field", "displacement", "u_disp"),
-    "u_phase": ("unknown field", "damage", 1, 1),
+    "u_phase": ("unknown field", "damage", 1),
     "v_phase": ("test field", "damage", "u_phase"),
 }
 
@@ -307,15 +312,15 @@ integrals = {
 
 equations = {
     "disp": """dw_lin_elastic.i.Omega(mat.C, v_disp, u_disp)""",
-    "phase": """dw_laplace.i.Omega(const.Gcls, v_phase, u_phase)
+    "phase": """dw_laplace.i.Omega(mat.Gcls, v_phase, u_phase)
         + dw_dot.i.Omega(mat.Psi, v_phase, u_phase)
-        + dw_dot.i.Omega(const.Gc_ls, v_phase, u_phase)
-        - dw_integrate.i.Omega(const.Gc_ls, v_phase)""",
+        + dw_dot.i.Omega(mat.Gc_ls, v_phase, u_phase)
+        - dw_integrate.i.Omega(mat.Gc_ls, v_phase)""",
 }
 
 materials = {
     "mat": "material",
-    "const": ({"C": CMAT, "Gcls": GC * LS, "Gc_ls": GC / LS},),
+    "const": ({"C": CMAT},),
 }
 
 functions = {
@@ -324,26 +329,26 @@ functions = {
 
 regions = {
     "Omega": "all",
-    "Load": ("vertices in (y == %f)" % LOAD["Y"], "facet"),
-    "Fixed": ("vertices in (y == %f)" % FIXED["Y"], "facet"),
+    "LoadA": ("vertices in (x == %f) & (y >= %f)" % (LOAD["X"], LOAD["YA"]), "facet"),
+    "LoadB": ("vertices in (x == %f) & (y <= %f)" % (LOAD["X"], LOAD["YB"]), "facet"),
+    "Fixed": ("vertices in (x == 0.0)", "facet"),
     "Crack": (
-        "vertices in (x <= %f) & (y >= %f) & (y <= %f)"
+        "vertices in (x >= %f) & (y >= %f) & (y <= %f)"
         % (CRACK["X"], CRACK["Y1"], CRACK["Y2"]),
         "cell",
     ),
 }
 
-regions = {
-    "Omega": "all",
-    "Load": ("vertices in (y == 1.0)", "facet"),
-    "Fixed": ("vertices in (y == 0.0)", "facet"),
-    "Crack": ("vertices in (x <= 0.5) & (y >= 0.4985) & (y <= 0.5015)", "cell"),
+ebcs = {
+    "fixed": ("Fixed", {"u_disp.0": 0.0}),
+    "load_a": ("LoadA", {"u_disp.1": 0.0}),
+    "load_b": ("LoadB", {"u_disp.1": 0.0}),
+    "crack": ("Crack", {"u_phase.all": 0.0}),
 }
 
-ebcs = {
-    "fixed": ("Fixed", {"u_disp.all": 0.0}),
-    "load": ("Load", {"u_disp.1": 0.0}),
-    "crack": ("Crack", {"u_phase.all": 0.0}),
+lcbs = {
+    "load_a_rigid": ("LoadA", {"u_disp.all", None}, None, "rigid"),
+    "load_b_rigid": ("LoadB", {"u_disp.all", None}, None, "rigid"),
 }
 
 solvers = {
@@ -353,13 +358,6 @@ solvers = {
         {
             "i_max": IMAX,
             "eps_a": TOL,
-        },
-    ),
-    "scipy": (
-        "nls.scipy_fmin_like",
-        {
-            "method": "fmin_bfgs",
-            "i_max": IMAX,
         },
     ),
     "ts": (

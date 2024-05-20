@@ -31,49 +31,28 @@ def material_properties(ts, coors, mode=None, **kwargs):
     strain = ev("ev_cauchy_strain.i.Omega(u_disp)", mode=mode).reshape(-1, 3, 1)
     damage = ev("ev_integrate.i.Omega(u_phase)", mode=mode).reshape(-1, 1, 1)
 
-    # Trace and trace mask for tension or compressive
-    trace = strain[:, 0, 0] + strain[:, 1, 0]
-    trace_mask = trace >= 0
-
-    # Deviatoric strain calculation
-    strain_dev = strain.copy()
-    strain_dev[:, :2, 0] -= trace[:, np.newaxis] / 2
+    # Trace for tension or compression
+    trace = strain[:, 0, 0] + strain[:, 1, 0] >= 0
 
     # Elastic strain energy
     pb.psi = np.maximum(
         pb.psi,
         np.where(
-            trace_mask,
-            np.einsum("jk, ijk, ikl -> i", CMAT, strain, strain),
-            np.einsum("jk, ijk, ikl -> i", CMAT, strain_dev, strain_dev),
+            trace,
+            np.einsum("ijk, jk, ikl -> i", strain, CMAT, strain),
+            np.einsum("ijk, jk, ikl -> i", strain, CDEV, strain),
         ).reshape(dims),
     )
 
     # Modified elastic stiffness tensor
     damage **= 2
     c_mod = np.where(
-        trace_mask.reshape(dims),
+        trace.reshape(dims),
         (damage + ETA) * CMAT,
         (damage + ETA) * CDEV + CVOL,
     )
 
-    # On the first step, use the quad point coords to assign the fracture toughness
-    if ts.n_step == 1:
-        map_gc(pb.gc, coors)
-
     return {"C": c_mod, "Psi": pb.psi, "Gcls": pb.gc * LS, "Gc_ls": pb.gc / LS}
-
-
-def map_gc(gc, coors):
-    n_int = 0
-
-    for i, coor in enumerate(coors):
-        if coor[1] >= LOAD["YA"] and coor[1] <= LOAD["YB"]:
-            gc[i] = GC_I
-            n_int += 1
-
-    print(f"Number of quads with interface fracture toughness: {n_int}")
-    print(f"Number of quads with bulk fracture toughness: {len(gc) - n_int}")
 
 
 def time_step(ts, status, adt, pb, verbose=False):
@@ -99,6 +78,16 @@ def pre_process(pb):
         case _:
             raise ValueError(f"Unsupported element type: {pb.domain.mesh.descs[0]}")
 
+    pb.step = STEP_MIN
+    pb.disp = 0.0
+    pb.exit = 0
+    pb.cutbacks = 0
+    pb.step_cooldown = 0
+    pb.psi = np.zeros((pb.domain.mesh.n_el * n_quads, 1, 1))
+    pb.gc = np.full((pb.domain.mesh.n_el * n_quads, 1, 1), GC_B)
+    pb.log = IndexedStruct(disp=[], force=[], damage=[], damage_avg=[], energy_avg=[])
+    pb.history = IndexedStruct
+
     for region in pb.domain.regions:
         match region.true_kind:
             case "vertex":
@@ -113,15 +102,14 @@ def pre_process(pb):
         ents = len(region.entities[type[2]])
         print(f'Region "{region.name}" has {ents} {ents == 1 and type[0] or type[1]}')
 
-    pb.step = STEP_MIN
-    pb.disp = 0.0
-    pb.exit = 0
-    pb.cutbacks = 0
-    pb.step_cooldown = 0
-    pb.psi = np.zeros((pb.domain.mesh.n_el * n_quads, 1, 1))
-    pb.gc = np.full((pb.domain.mesh.n_el * n_quads, 1, 1), GC_B)
-    pb.log = IndexedStruct(disp=[], force=[], damage=[], damage_avg=[], energy_avg=[])
-    pb.history = IndexedStruct
+    n_int = 0
+    for i, coor in enumerate(pb.domain.mesh.coors):
+        if coor[1] >= LOAD["YA"] and coor[1] <= LOAD["YB"]:
+            pb.gc[i] = GC_I
+            n_int += 1
+
+    print(f"Number of quads with interface fracture toughness: {n_int}")
+    print(f"Number of quads with bulk fracture toughness: {len(pb.gc) - n_int}")
 
 
 def nls_iter_hook(pb, nls, vec, it, err, err0):
@@ -283,7 +271,7 @@ def purge_savefiles():
 T0 = 0.0  # Initial time (always 0)
 T1 = 1.0  # Arbitrary final time
 DT = 2.5e-3  # Initial time step -- NOT USED
-TOL = 5e-5  # Tolerance for the nonlinear solver
+TOL = 2e-5  # Tolerance for the nonlinear solver
 IMAX = 50  # Maximum number of solver iterations
 DEX = 4e-3  # Exit displacement requirement (m)
 D_TOL = 5e-10  # Damage tolerance
@@ -298,13 +286,15 @@ CMAT = matcoefs.stiffness_from_youngpoisson(dim=2, young=E, poisson=NU, plane="s
 CDEV = tensors.get_deviator(CMAT)
 CVOL = tensors.get_volumetric_tensor(CMAT)
 
-LS = 0.03e-3  # Length scale (m)
+LS = 13e-6  # Length scale (m)
 GC_I = 281  # Interface fracture energy (N/m)
 GC_B = GC_I * 10  # Beam fracture energy (N/m)
 ETA = 1e-15  # Regularization parameter
 
 ORDER = 2
 DEGREE = 2 * ORDER
+
+MESH = "sym-dcb-refined.vtk"
 
 LOAD = {"X": 50e-3, "YA": 1.1e-3, "YB": 1.0e-3}
 FIXED = {"X": 50e-3, "Y": 1.0e-3}
@@ -327,7 +317,7 @@ steps = [
 start_time = datetime.now()
 start_time_string = start_time.strftime("%Y-%m-%d_%H-%M-%S")
 script_directory = os.path.dirname(__file__)
-filename_mesh = os.path.join(script_directory, "meshes", "sym-dcb.vtk")
+filename_mesh = os.path.join(script_directory, "meshes", MESH)
 save_directory = os.path.join(
     script_directory,
     "files",

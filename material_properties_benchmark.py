@@ -4,7 +4,7 @@ import numpy as np
 from sfepy.mechanics.tensors import get_deviator, get_volumetric_tensor
 from sfepy.mechanics.matcoefs import stiffness_from_youngpoisson
 
-NE = 1000  # 150_000
+NE = 150_000  # 150_000
 NQ = 9
 ETA = 1e-15
 CMAT = stiffness_from_youngpoisson(dim=2, young=210e3, poisson=0.3, plane="strain")
@@ -56,27 +56,24 @@ def standard_loop(strain, damage, psi):
 
 def fast_einsum(strain, damage, psi):
     dims = psi.shape
-    trace = strain[:, 0, 0] + strain[:, 1, 0]
-    trace_mask = trace >= 0
 
-    # Deviatoric strain calculation
-    strain_dev = strain.copy()
-    strain_dev[:, :2, 0] -= trace[:, np.newaxis] / 2
+    # Trace for tension or compression
+    trace = strain[:, 0, 0] + strain[:, 1, 0] >= 0
 
     # Elastic strain energy
     psi = np.maximum(
         psi,
         np.where(
-            trace_mask,
-            np.einsum("jk, ijk, ikl -> i", CMAT, strain, strain),
-            np.einsum("jk, ijk, ikl -> i", CMAT, strain_dev, strain_dev),
+            trace,
+            np.einsum("ijk, jk, ikl -> i", strain, CMAT, strain),
+            np.einsum("ijk, jk, ikl -> i", strain, CDEV, strain),
         ).reshape(dims),
     )
 
     # Modified elastic stiffness tensor
     damage **= 2
     c_mod = np.where(
-        trace_mask.reshape(dims),
+        trace.reshape(dims),
         (damage + ETA) * CMAT,
         (damage + ETA) * CDEV + CVOL,
     )
